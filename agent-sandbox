@@ -1,0 +1,718 @@
+#!/usr/bin/env nix-shell
+#! nix-shell -i python3 -p python3 bubblewrap fuse-overlayfs rsync coreutils util-linux diffutils
+r"""
+=============================================================================
+agent-sandbox
+=============================================================================
+
+Runs a process (typically an AI coding agent) inside a bubblewrap (bwrap)
+sandbox with a locked-down filesystem view:
+
+  - Nothing is visible inside the sandbox unless explicitly exposed. This
+    isn't "read-only by default" — unlisted paths don't exist at all from
+    the sandboxed process's point of view (bwrap starts from an empty
+    mount namespace).
+  - Paths passed with -r are exposed READ-ONLY (e.g. a .gitconfig, a
+    reference doc folder, or ~/.nix-profile if your packages live there
+    rather than under /run/current-system — see "AVAILABLE PROGRAMS"
+    below).
+  - Paths passed with -w are exposed as apparently-normal, apparently-
+    writable directories, but every write is secretly redirected into a
+    fuse-overlayfs staging area under $AGENT_SANDBOX_HOME. The real
+    directory on disk is NEVER modified by `run` — only by a later,
+    explicit `apply`.
+
+Environment variables are a separate channel from the filesystem, and are
+INHERITED BY DEFAULT (bwrap passes through the invoking shell's full
+environment unless told otherwise) — so API keys, SSH agent sockets, etc.
+that happen to be exported in your shell are visible to the sandboxed
+process even though the filesystem is locked down. Opt into a clean
+environment with --clearenv, and allow specific variables through with
+-e/--setenv. See "ENVIRONMENT VARIABLES" below.
+
+This gives you a review step for filesystem changes: run the agent,
+inspect exactly what it changed with `diff`, then either `apply` (copy the
+staged result onto the real directory) or `discard` (delete the staged
+changes; the real directory was never touched).
+
+THREAT MODEL / CAVEATS:
+  - This isolates mistakes and runaway writes, and lets you audit changes
+    before they land. It does NOT provide a hard security boundary: the
+    kernel is shared with the host (no VM, no separate kernel), so it will
+    not contain a deliberately malicious actor with a working namespace/
+    kernel exploit. Treat it as "undo-able, inspectable sandboxing," not
+    as isolation from an adversary.
+  - Network access is left ON by default (most agents need it to reach an
+    API). Pass --no-net to cut it off for a given run.
+  - Be deliberate about what you pass to -r. Read access is also
+    exfiltration risk if the sandboxed process has network access — don't
+    blanket-expose your whole $HOME; it would expose ~/.ssh, browser
+    profiles, cloud credentials, etc. for reading.
+  - Environment variables are inherited by default (see above) — if you
+    care about limiting what the agent can read as much as what it can
+    write, use --clearenv and allow-list what it actually needs with -e.
+  - Caches/config dirs (~/.cache, ~/.npm, ~/.cargo, ...) are invisible
+    unless you expose them. Build tools that insist on writing there will
+    fail unless you add e.g. `--tmpfs "$HOME/.cache"` to bwrap_args in
+    cmd_run for scratch space that doesn't need review (it vanishes on
+    exit).
+
+-----------------------------------------------------------------------------
+AVAILABLE PROGRAMS (ls, git, etc.)
+-----------------------------------------------------------------------------
+
+$PATH is inherited as-is, and /nix, /etc, and /run are bound read-only, so:
+  - System packages (environment.systemPackages), under
+    /run/current-system/sw/bin -> work out of the box.
+  - Home-manager packages, IF home-manager.useUserPackages = true (profiles
+    under /etc/profiles/per-user/$USER) -> also work out of the box.
+  - Legacy `nix-env -i` / home-manager without useUserPackages, under
+    ~/.nix-profile/bin -> INVISIBLE by default, because that path is under
+    $HOME, which is not bound. Fix with: -r ~/.nix-profile
+Check with: readlink -f "$(command -v git)" on the host, to see which
+category a given program falls into.
+
+-----------------------------------------------------------------------------
+ENVIRONMENT VARIABLES
+-----------------------------------------------------------------------------
+
+Default: the sandboxed process sees your FULL inherited environment,
+exactly as a normal bwrap invocation would (nothing is stripped).
+
+  --clearenv        Opt-in: start the sandboxed process with NO inherited
+                     environment variables at all (bwrap --clearenv).
+                     Combine with -e to allow specific ones through.
+  -e / --setenv X    Expose variable X. Two forms:
+                       -e NAME=VALUE   set NAME to exactly VALUE
+                       -e NAME         pass through NAME's CURRENT value
+                                       from the invoking shell (errors out
+                                       if NAME isn't set on the host)
+                     Repeatable. Works whether or not --clearenv was
+                     given: without --clearenv it overrides/adds on top of
+                     the inherited environment; with --clearenv it's the
+                     only way anything gets set.
+
+Example — agent can reach its API but nothing else from your shell:
+  agent-sandbox run -w ~/git/myproject --clearenv \
+    -e PATH -e OPENAI_API_KEY -- my-agent
+
+-----------------------------------------------------------------------------
+CLAUDE MODE
+-----------------------------------------------------------------------------
+
+`claude` behaves like `run` with CMD fixed to the host's `claude`; everything
+after `--` is passed to claude as its own arguments (e.g. `-- --resume`).
+Differences from `run`:
+
+  - -w is optional and defaults to the current directory (refused if that is
+    $HOME). Staging, diff, apply and discard work exactly as for `run`.
+  - ~/.claude and ~/.claude.json are bound READ-WRITE and LIVE: no overlay,
+    no review step, so login, history, settings and memory persist. They are
+    created if missing (~/.claude.json as `{}`). Consequently the sandboxed
+    process can read your Claude credentials and edit your global
+    settings/hooks/CLAUDE.md — that is the price of a usable claude.
+  - The claude binary is resolved on the host and run by its real path. If it
+    lives under $HOME (e.g. the native installer's ~/.local/share/claude) it
+    is bound read-only automatically; script-style installs that need sibling
+    files must be added with -r.
+  - DISABLE_AUTOUPDATER=1 is set, since the binary is read-only (override
+    with -e DISABLE_AUTOUPDATER=0).
+  - With --clearenv, HOME, USER, PATH, SHELL, TERM, COLORTERM, LANG and
+    LC_ALL are still passed through so the TUI can start. API-key variables
+    are NOT: add e.g. `-e ANTHROPIC_API_KEY` if you don't use a login.
+  - Not exposed automatically (add with -r if you want them): ~/.gitconfig
+    (commits would have no identity), ~/.ssh, ~/.config/gh, and any tools
+    that only exist under $HOME. Hooks or MCP servers in ~/.claude/settings
+    that call such tools will fail inside the sandbox.
+  - Symlinks inside ~/.claude that point outside it dangle in the sandbox.
+
+Example:
+  agent-sandbox claude -r ~/.gitconfig -- --dangerously-skip-permissions
+
+-----------------------------------------------------------------------------
+USAGE
+-----------------------------------------------------------------------------
+
+  agent-sandbox run  -w DIR [-w DIR ...] [-r PATH ...] [-e VAR[=VAL] ...] \
+                      [--clearenv] [--no-net] -- CMD [ARGS...]
+  agent-sandbox claude [-w DIR ...] [-r PATH ...] [-e VAR[=VAL] ...] \
+                      [--clearenv] [--no-net] [-- CLAUDE_ARGS...]
+  agent-sandbox diff    DIR
+  agent-sandbox apply   DIR
+  agent-sandbox discard DIR
+  agent-sandbox --help | -h
+
+  claude    Like `run`, but launches `claude` for you. See "CLAUDE MODE"
+            below.
+
+  run       Launch CMD inside the sandbox. -w DIR may be given multiple
+            times, once per directory the process should be able to write
+            to (each gets its own independent staging area). -r PATH may
+            be given multiple times for extra read-only paths. -e may be
+            given multiple times for environment variables (see above).
+            Everything after `--` is the command to run (defaults to
+            $SHELL if omitted).
+
+  diff DIR  Show what the staged (not-yet-applied) changes for DIR would
+            do, as a unified diff between the real DIR and the staged
+            result. Safe to run at any time; doesn't require `run` to
+            still be active.
+
+  apply DIR Prompts for confirmation, then copies the staged result onto
+            the real DIR (rsync --delete, so the real DIR ends up
+            byte-for-byte equal to what was staged) and clears the
+            staging area. Only affects DIR on explicit confirmation.
+
+  discard DIR
+            Deletes the staged changes for DIR without touching DIR.
+
+EXAMPLES
+
+  # Agent may write to one repo, and can read your git identity so
+  # commits are attributed correctly; no network; full env inherited.
+  agent-sandbox run -w ~/git/myproject -r ~/.gitconfig --no-net -- my-agent
+
+  # Same, but with a clean environment except for PATH and an API key.
+  agent-sandbox run -w ~/git/myproject --clearenv -e PATH -e OPENAI_API_KEY -- my-agent
+
+  # Review, then accept.
+  agent-sandbox diff  ~/git/myproject
+  agent-sandbox apply ~/git/myproject
+
+  # ...or reject. ~/git/myproject was untouched the whole time either way.
+  agent-sandbox discard ~/git/myproject
+
+=============================================================================
+"""
+
+import argparse
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+from pathlib import Path
+from typing import NoReturn
+
+# Where staging areas live. Override with AGENT_SANDBOX_HOME if you want
+# them somewhere other than ~/.agent-sandbox (e.g. on a different disk).
+STATE = Path(os.environ.get("AGENT_SANDBOX_HOME") or Path.home() / ".agent-sandbox") / "overlays"
+
+HELP = r"""agent-sandbox — run a process under bwrap with staged, reviewable writes.
+
+USAGE:
+  agent-sandbox run  -w DIR [-w DIR ...] [-r PATH ...] [-e VAR[=VAL] ...] \
+                      [--clearenv] [--no-net] -- CMD [ARGS...]
+  agent-sandbox claude [-w DIR ...] [-r PATH ...] [-e VAR[=VAL] ...] \
+                      [--clearenv] [--no-net] [-- CLAUDE_ARGS...]
+  agent-sandbox diff    DIR
+  agent-sandbox apply   DIR
+  agent-sandbox discard DIR
+  agent-sandbox --help | -h
+
+OPTIONS (for `run` and `claude`):
+  -w DIR            A directory the sandboxed process may write to. Writes
+                     are captured in a fuse-overlayfs staging area; DIR
+                     itself is not modified until you run `apply DIR`.
+                     Repeatable.
+  -r PATH            An extra file or directory exposed read-only inside the
+                     sandbox (e.g. ~/.gitconfig, ~/.nix-profile). Repeatable.
+                     Anything not listed via -w/-r is invisible to the
+                     sandboxed process.
+  -e, --setenv VAR   Expose an environment variable. Two forms:
+                       -e NAME=VALUE   set NAME to exactly VALUE
+                       -e NAME         pass through NAME's current value
+                                       from your shell (errors if unset)
+                     Repeatable. Works with or without --clearenv.
+  --clearenv         Start with NO inherited environment variables (instead
+                     of the default: full environment passed through).
+                     Combine with -e to allow specific ones through.
+  --no-net           Disable network access for this run (unshares the net
+                     namespace). Network is allowed by default.
+  -- CMD ...         The command to run inside the sandbox. Defaults to
+                     $SHELL.
+
+COMMANDS:
+  run      Launch CMD inside the sandbox (see OPTIONS above).
+  claude   Like run, but launches `claude` (args after `--` go to it). -w
+           defaults to the current directory. ~/.claude and ~/.claude.json are
+           bound read-write and LIVE (not staged); the claude binary is
+           exposed read-only if it lives under $HOME; DISABLE_AUTOUPDATER=1.
+           With --clearenv, HOME/USER/PATH/SHELL/TERM/COLORTERM/LANG/LC_ALL
+           still pass through; API keys do not (use -e).
+  diff DIR Show a unified diff between the real DIR and its staged changes.
+  apply DIR
+           After confirmation, copy the staged result onto the real DIR
+           and clear the staging area. DIR is untouched until confirmed.
+  discard DIR
+           Delete the staged changes for DIR without touching DIR.
+
+EXAMPLES:
+  agent-sandbox run -w ~/git/myproject -r ~/.gitconfig --no-net -- my-agent
+  agent-sandbox run -w ~/git/myproject --clearenv -e PATH -e OPENAI_API_KEY -- my-agent
+  agent-sandbox claude -r ~/.gitconfig -- --resume
+  agent-sandbox diff  ~/git/myproject
+  agent-sandbox apply ~/git/myproject
+  agent-sandbox discard ~/git/myproject
+
+ENVIRONMENT:
+  AGENT_SANDBOX_HOME   Where staging areas are stored (default: ~/.agent-sandbox)
+
+Everything not explicitly exposed via -w/-r (plus /nix, /etc, /run, /usr,
+/dev, /proc, /tmp, which are provided so the toolchain works) is invisible
+inside the sandbox, not merely read-only. Environment variables are
+inherited in full unless you pass --clearenv. See the docstring at the top
+of this script for the full threat-model notes.
+"""
+
+USAGE_LINE = "usage: agent-sandbox {run|claude|diff|apply|discard} ... | agent-sandbox --help"
+
+
+def fail(msg: str) -> NoReturn:
+    """Print an error to stderr and exit with status 1."""
+    print(f"agent-sandbox: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def say(msg: str) -> None:
+    """Print MSG, flushing so it stays ordered relative to the child's output."""
+    print(msg, flush=True)
+
+
+# ---- path helpers -----------------------------------------------------------
+# Every write target gets a slug derived from its absolute path (slashes and
+# spaces replaced with underscores), used to namespace its staging dirs under
+# STATE so two different -w targets never collide.
+
+
+def id_for(path: str) -> str:
+    """Return a filesystem-safe identifier for PATH, used as a directory name under STATE."""
+    return re.sub(r"[/ ]", "_", os.path.realpath(path).removeprefix("/"))
+
+
+def upper_of(path: str) -> Path:
+    """Return the overlay upperdir, which holds every changed file."""
+    return STATE / id_for(path) / "upper"
+
+
+def work_of(path: str) -> Path:
+    """Return the overlay workdir, fuse-overlayfs's internal scratch space."""
+    return STATE / id_for(path) / "work"
+
+
+def merged_of(path: str) -> Path:
+    """Return the merged read/write view that gets bind-mounted into the sandbox."""
+    return STATE / id_for(path) / "merged"
+
+
+def is_mounted(path: Path) -> bool:
+    """Return True if PATH is currently a mountpoint."""
+    return (
+        subprocess.run(
+            ["mountpoint", "-q", str(path)], stderr=subprocess.DEVNULL, check=False
+        ).returncode
+        == 0
+    )
+
+
+def mount_overlay(target: str) -> bool:
+    """Ensure the overlay for TARGET is mounted at merged_of(TARGET).
+
+    TARGET is the overlay's read-only lowerdir, so this never modifies it.
+    Returns True only if this call performed the mount (False if it was
+    already mounted, e.g. by a live `run`).
+    """
+    upper, work, merged = upper_of(target), work_of(target), merged_of(target)
+    for d in (upper, work, merged):
+        d.mkdir(parents=True, exist_ok=True)
+    if is_mounted(merged):
+        return False
+    try:
+        rc = subprocess.run(
+            [
+                "fuse-overlayfs",
+                "-o",
+                f"lowerdir={target},upperdir={upper},workdir={work}",
+                str(merged),
+            ],
+            check=False,
+        ).returncode
+    except FileNotFoundError:
+        fail("fuse-overlayfs not found in PATH")
+    if rc != 0:
+        fail(f"fuse-overlayfs failed to mount the overlay for '{target}'")
+    return True
+
+
+def unmount_overlay(target: str) -> None:
+    """Tear down the FUSE mount for TARGET, keeping the staged changes."""
+    merged = merged_of(target)
+    if is_mounted(merged):
+        subprocess.run(["fusermount", "-u", str(merged)], stderr=subprocess.DEVNULL, check=False)
+
+
+def remove_staging(target: str) -> None:
+    """Delete the staging area (upper/work/merged) for TARGET."""
+    root = STATE / id_for(target)
+    if not root.exists():
+        return
+    # The agent may have created read-only dirs in the upperdir; make them
+    # traversable first or rmtree fails. Never chmod through symlinks.
+    os.chmod(root, 0o700)
+    for dirpath, dirnames, _ in os.walk(root):
+        for d in dirnames:
+            p = os.path.join(dirpath, d)
+            if not os.path.islink(p):
+                os.chmod(p, 0o700)
+    shutil.rmtree(root)
+
+
+def resolve_arg(flag: str, value: str, must_be_dir: bool) -> str:
+    """Resolve a -w/-r VALUE to a real path, failing if it is missing or the wrong type."""
+    path = os.path.realpath(value)
+    if not os.path.exists(path):
+        fail(f"{flag} {value}: no such file or directory")
+    if must_be_dir and not os.path.isdir(path):
+        fail(f"{flag} {value}: not a directory")
+    return path
+
+
+class RunParser(argparse.ArgumentParser):
+    """Argument parser for `run` that reports errors via fail() (exit 1, not argparse's 2)."""
+
+    def error(self, message: str) -> NoReturn:
+        fail(message)
+
+
+def parse_env(specs: list[str]) -> list[tuple[str, str]]:
+    """Turn -e specs (NAME or NAME=VALUE) into (name, value) pairs."""
+    pairs = []
+    for spec in specs:
+        if "=" in spec:
+            name, value = spec.split("=", 1)
+        else:
+            name = spec
+            if name not in os.environ:
+                fail(
+                    f"-e {name}: not set in your environment "
+                    f"(use -e {name}=VALUE to set it explicitly)"
+                )
+            value = os.environ[name]
+        pairs.append((name, value))
+    return pairs
+
+
+def keep_controlling_tty() -> bool:
+    """Return True if the sandbox can safely share our controlling terminal.
+
+    bwrap's --new-session (setsid) blocks TIOCSTI keystroke injection into the
+    host terminal but also removes the controlling tty, which breaks job control
+    in interactive shells. When stdin is a TTY and the kernel has TIOCSTI
+    disabled, the protection is redundant, so we skip it.
+    """
+    if not sys.stdin.isatty():
+        return False
+    try:
+        return Path("/proc/sys/dev/tty/legacy_tiocsti").read_text(encoding="utf-8").strip() == "0"
+    except OSError:
+        return False
+
+
+def parse_run_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
+    """Split ARGV at the first `--` and parse the options before it."""
+    # Split at the first `--` ourselves; argparse.REMAINDER mishandles it.
+    if "--" in argv:
+        i = argv.index("--")
+        opts, cmd = argv[:i], argv[i + 1 :]
+    else:
+        opts, cmd = argv, []
+
+    parser = RunParser(prog="agent-sandbox run", add_help=False, allow_abbrev=False)
+    parser.add_argument("-w", action="append", default=[], metavar="DIR")
+    parser.add_argument("-r", action="append", default=[], metavar="PATH")
+    parser.add_argument("-e", "--setenv", dest="env", action="append", default=[], metavar="VAR")
+    parser.add_argument("--clearenv", action="store_true")
+    parser.add_argument("--no-net", action="store_true")
+    return parser.parse_args(opts), cmd
+
+
+def base_bwrap_args(no_net: bool) -> list[str]:
+    """Toolchain paths plus general namespace hardening for the sandbox."""
+    # /nix, /etc, /run, /usr are bound read-only so the Nix store, symlinked
+    # profiles, and system config are usable; /dev, /proc, /tmp are the
+    # minimum a process needs to run at all. Everything else is absent.
+    bwrap_args = [
+        "--ro-bind", "/nix", "/nix",
+        "--ro-bind", "/etc", "/etc",
+        "--ro-bind", "/run", "/run",
+        "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+        "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+        "--die-with-parent",
+    ]  # fmt: skip
+    if not keep_controlling_tty():
+        bwrap_args.append("--new-session")
+    for path in ("/bin", "/usr"):
+        if os.path.isdir(path):
+            bwrap_args += ["--ro-bind", path, path]
+    if no_net:
+        bwrap_args.append("--unshare-net")
+    return bwrap_args
+
+
+def env_bwrap_args(clearenv: bool, env: list[tuple[str, str]]) -> list[str]:
+    """Environment is inherited in full by default; --clearenv opts out.
+
+    -e/--setenv allow-lists (or overrides) individual variables on top.
+    --clearenv must precede the --setenv entries so bwrap clears first, then
+    (re)adds just the allowed ones.
+    """
+    bwrap_args = ["--clearenv"] if clearenv else []
+    for name, value in env:
+        bwrap_args += ["--setenv", name, value]
+    return bwrap_args
+
+
+def announce_run(
+    writes: list[str],
+    reads: list[str],
+    live: list[str],
+    clearenv: bool,
+    env: list[tuple[str, str]],
+) -> None:
+    """Tell the user what the sandboxed process can see and modify."""
+    say(f"[agent-sandbox] writable (staged): {' '.join(writes)}")
+    if live:
+        say(f"[agent-sandbox] writable (LIVE, not staged): {' '.join(live)}")
+    if reads:
+        say(f"[agent-sandbox] read-only extra:    {' '.join(reads)}")
+    if clearenv:
+        allowed = " ".join(name for name, _ in env) or "(none)"
+        say(f"[agent-sandbox] environment: cleared, except: {allowed}")
+    else:
+        say("[agent-sandbox] environment: inherited in full (use --clearenv to restrict)")
+    say("[agent-sandbox] everything else is invisible to the sandboxed process.")
+
+
+def run_staged(
+    bwrap_args: list[str], writes: list[str], cmd: list[str], late_args: list[str]
+) -> int:
+    """Overlay each write target, run CMD under bwrap, and always unmount; return its status.
+
+    LATE_ARGS go after the overlay binds, so they win if they overlap a write target.
+    """
+    mounted: list[str] = []
+    rc = 1
+    try:
+        # Write targets (-w): overlay + bind the merged view over the real
+        # path, so the sandboxed process writes to what looks like the
+        # ordinary path, but lands in the staging area instead.
+        for t in writes:
+            mount_overlay(t)
+            mounted.append(t)
+            bwrap_args += ["--bind", str(merged_of(t)), t]
+
+        # First write target doubles as the working directory.
+        try:
+            rc = subprocess.run(
+                ["bwrap", *bwrap_args, *late_args, "--chdir", writes[0], "--", *cmd],
+                check=False,
+            ).returncode
+        except FileNotFoundError:
+            fail("bwrap not found in PATH")
+    finally:
+        for t in mounted:
+            unmount_overlay(t)
+    return rc
+
+
+def launch(
+    args: argparse.Namespace,
+    cmd: list[str],
+    writes: list[str],
+    *,
+    live: tuple[tuple[str, str], ...] = (),
+    extra_reads: tuple[str, ...] = (),
+    env_defaults: tuple[tuple[str, str], ...] = (),
+    env_passthrough: tuple[str, ...] = (),
+) -> NoReturn:
+    """Run CMD in the sandbox and exit with its status.
+
+    LIVE are (source, dest) pairs bound read-write straight onto the real
+    filesystem, bypassing the staging overlay. ENV_DEFAULTS are set unless the
+    user passes -e for the same name; ENV_PASSTHROUGH are copied from the host
+    when set there (and not given with -e), which matters under --clearenv.
+    """
+    user_env = parse_env(args.env)
+    given = {name for name, _ in user_env}
+    env = [(n, v) for n, v in env_defaults if n not in given]
+    env += [(n, os.environ[n]) for n in env_passthrough if n in os.environ and n not in given]
+    env += user_env
+
+    reads = [resolve_arg("-r", r, must_be_dir=False) for r in args.r]
+    reads += [p for p in extra_reads if p not in reads]
+
+    bwrap_args = base_bwrap_args(args.no_net) + env_bwrap_args(args.clearenv, env)
+    for p in reads:
+        bwrap_args += ["--ro-bind", p, p]
+    late_args: list[str] = []
+    for src, dest in live:
+        late_args += ["--bind", src, dest]
+
+    # The signal handlers turn SIGTERM/SIGHUP into SystemExit so the
+    # `finally` in run_staged still unmounts the overlays.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda signum, _frame: sys.exit(128 + signum))
+
+    announce_run(writes, reads, [d for _, d in live], args.clearenv, env)
+    rc = run_staged(bwrap_args, writes, cmd, late_args)
+    sys.exit(rc if rc >= 0 else 128 - rc)
+
+
+def cmd_run(argv: list[str]) -> NoReturn:
+    """Parse `run` args, mount an overlay per -w target, and run CMD under bwrap."""
+    args, cmd = parse_run_args(argv)
+
+    writes = [resolve_arg("-w", w, must_be_dir=True) for w in args.w]
+    if not writes:
+        fail("at least one -w DIR is required")
+    if not cmd:
+        cmd = [os.environ.get("SHELL") or "sh"]
+    launch(args, cmd, writes)
+
+
+def claude_state() -> tuple[tuple[str, str], ...]:
+    """Return (source, dest) bind pairs for ~/.claude and ~/.claude.json, creating them if absent.
+
+    The destination keeps the path as written (~/.claude), while the source is
+    fully resolved, so dotfile-manager symlinks still land in the right place.
+    """
+    home = Path.home()
+    config_dir, config_json = home / ".claude", home / ".claude.json"
+    if config_dir.exists() and not config_dir.is_dir():
+        fail(f"{config_dir} exists but is not a directory")
+    if config_json.is_dir():
+        fail(f"{config_json} is a directory, expected a file")
+    config_dir.mkdir(mode=0o700, exist_ok=True)
+    if not config_json.exists():
+        # bwrap can only bind an existing file; "{}" is a valid empty Claude config.
+        config_json.write_text("{}\n", encoding="utf-8")
+        config_json.chmod(0o600)
+    return tuple((os.path.realpath(p), str(p)) for p in (config_dir, config_json))
+
+
+def find_claude() -> tuple[str, tuple[str, ...]]:
+    """Return the real path of the host's `claude` and any extra read-only binds it needs."""
+    found = shutil.which("claude")
+    if not found:
+        fail("claude not found in PATH")
+    real = os.path.realpath(found)
+    # Binaries under these roots are already visible via base_bwrap_args. Anything
+    # else (e.g. ~/.local/share/claude/versions/X from the native installer) is bound
+    # on its own; npm-style installs with sibling files need an explicit -r.
+    if real.startswith(("/nix/", "/usr/", "/bin/", "/run/")):
+        return real, ()
+    return real, (real,)
+
+
+def cmd_claude(argv: list[str]) -> NoReturn:
+    """Like `run`, but launches `claude` with its config dir and file live read-write."""
+    args, claude_args = parse_run_args(argv)
+
+    writes = [resolve_arg("-w", w, must_be_dir=True) for w in args.w]
+    if not writes:
+        cwd = os.path.realpath(os.getcwd())
+        if cwd == os.path.realpath(Path.home()):
+            fail("refusing to stage all of $HOME; pass -w DIR or cd into a project")
+        writes = [cwd]
+
+    claude, extra_reads = find_claude()
+    launch(
+        args,
+        [claude, *claude_args],
+        writes,
+        live=claude_state(),
+        extra_reads=extra_reads,
+        # The binary is bound read-only, so the self-updater could only fail noisily.
+        env_defaults=(("DISABLE_AUTOUPDATER", "1"),),
+        # Under --clearenv, still give claude what a TUI needs to start at all.
+        env_passthrough=("HOME", "USER", "PATH", "SHELL", "TERM", "COLORTERM", "LANG", "LC_ALL"),
+    )
+
+
+def one_dir(argv: list[str], command: str) -> str:
+    """Return the real path of the single DIR argument to COMMAND, failing if not exactly one."""
+    if len(argv) != 1:
+        fail(f"usage: agent-sandbox {command} DIR")
+    return os.path.realpath(argv[0])
+
+
+def cmd_diff(argv: list[str]) -> None:
+    """Print a unified diff between the real DIR and its staged result."""
+    t = one_dir(argv, "diff")
+    mounted_here = mount_overlay(t)
+    try:
+        rc = subprocess.run(["diff", "-ruN", t, str(merged_of(t))], check=False).returncode
+    finally:
+        if mounted_here:
+            unmount_overlay(t)
+    if rc > 1:  # 1 just means "differences found"
+        sys.exit(rc)
+
+
+def cmd_apply(argv: list[str]) -> None:
+    """After confirmation, make the real DIR identical to the staged result."""
+    t = one_dir(argv, "apply")
+    mounted_here = mount_overlay(t)
+    try:
+        say(f"Review first with: agent-sandbox diff '{t}'")
+        try:
+            ans = input(f"Apply staged changes to '{t}'? [y/N] ")
+        except EOFError:
+            ans = ""
+        if ans in ("y", "Y"):
+            rc = subprocess.run(
+                ["rsync", "-a", "--delete", f"{merged_of(t)}/", f"{t}/"], check=False
+            ).returncode
+            if rc != 0:
+                fail(f"rsync failed (exit {rc}); staged changes kept")
+            unmount_overlay(t)
+            remove_staging(t)
+            say("Applied and cleared staging area.")
+        else:
+            say("Left staged changes untouched.")
+    finally:
+        if mounted_here:
+            unmount_overlay(t)
+
+
+def cmd_discard(argv: list[str]) -> None:
+    """Delete the staging area for DIR; DIR itself was never modified."""
+    t = one_dir(argv, "discard")
+    unmount_overlay(t)
+    remove_staging(t)
+    say(f"Discarded staged changes for '{t}'.")
+
+
+def main(argv: list[str]) -> None:
+    """Dispatch ARGV (without the program name) to the matching subcommand."""
+    command = argv[0] if argv else ""
+    if command in ("--help", "-h"):
+        print(HELP, end="")
+        return
+    handlers = {
+        "run": cmd_run,
+        "claude": cmd_claude,
+        "diff": cmd_diff,
+        "apply": cmd_apply,
+        "discard": cmd_discard,
+    }
+    if command not in handlers:
+        print(USAGE_LINE, file=sys.stderr)
+        sys.exit(1)
+    STATE.mkdir(parents=True, exist_ok=True)
+    handlers[command](argv[1:])
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
