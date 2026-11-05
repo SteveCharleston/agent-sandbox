@@ -124,8 +124,9 @@ agent-sandbox run [options] [--] PROGRAM [ARGS...]
 
 | Option | Meaning |
 |--------|---------|
-| `--env NAME` | Share only the named environment variable (repeatable). See 6.4. |
-| `--env-file FILE` | Read variable names to share from `FILE`. See 6.4. |
+| `--env NAME` | Share only the named host variable (repeatable). See 6.4. |
+| `--env NAME=VALUE` | Set `NAME` to `VALUE` inside the sandbox, regardless of the host (repeatable). See 6.4. |
+| `--env-file FILE` | Read `NAME` and `NAME=VALUE` entries from `FILE` (repeatable). See 6.4. |
 | `--no-network` | Disable network access in the sandbox. Network is shared by default. |
 | `--chdir DIR` | Working directory inside the sandbox. Default: current directory if visible, else `/`. |
 | `--layout {auto,fhs,nixos}` | Override host layout detection. Default: `auto`. |
@@ -284,19 +285,38 @@ directories is always shared **read-only**.
 
 - FR-50: **Default:** the full environment of `agent-sandbox` is passed to the program
   unchanged.
-- FR-51: If at least one `--env NAME` or `--env-file FILE` is given, the environment is
-  **restricted**: only the named variables (if set on the host) plus the **baseline set**
-  are passed. All other variables are discarded.
+- FR-51: If at least one `--env` or `--env-file` is given, the environment is
+  **restricted**: only the **baseline set**, the variables named without a value
+  (taken from the host, if set there), and the variables given with an explicit value
+  are passed. All other host variables are discarded. This applies even if all entries
+  are `NAME=VALUE` entries.
 - FR-52: **Baseline set**: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `LANG`,
   `LC_ALL`, `TZ`. Baseline variables are always passed if set, in both modes.
-- FR-53: `--env-file` format: one variable name per line, blank lines and lines starting
-  with `#` ignored, surrounding whitespace trimmed. Lines that are not valid variable
-  names are an error (exit 2) with file name and line number. It contains names, never
-  values.
-- FR-54: `--env` and `--env-file` can be combined and repeated, and the results are
-  merged.
-- FR-55: Environment variables are applied with bubblewrap's `--clearenv`/`--setenv`
+- FR-53: **Entry syntax**, for both `--env` and each line of an `--env-file`:
+  - `NAME`: pass the host value of `NAME`. If `NAME` is not set on the host, nothing is
+    set in the sandbox (no error).
+  - `NAME=VALUE`: set `NAME` to `VALUE` in the sandbox. The host value is ignored.
+  - Only the first `=` separates name and value. `VALUE` is taken **literally**: no
+    quote removal, no variable expansion, no escape processing, and it may contain `=`,
+    spaces, or `#`. `NAME=` sets `NAME` to the empty string.
+  - `NAME` must match `[A-Za-z_][A-Za-z0-9_]*`. Invalid entries are an error (exit 2),
+    with the file name and line number for `--env-file`.
+- FR-54: `--env-file` format: one entry per line. Blank lines and lines whose first
+  non-whitespace character is `#` are ignored. Leading whitespace before `NAME` and
+  trailing whitespace after a bare `NAME` are trimmed. For `NAME=VALUE`, whitespace in
+  `VALUE` is preserved. A file that cannot be read is an error (exit 2).
+- FR-55: `--env` and `--env-file` can be combined and repeated. They are processed in
+  command-line order. If a name occurs more than once, the **last** occurrence wins
+  (so a later `NAME=VALUE` overrides an earlier `NAME`, and the other way round).
+- FR-56: Explicit values may override baseline variables (for example `--env PATH=...`
+  or `--env HOME=/home/sandbox`). Overriding `PATH` is the user's responsibility and is
+  not validated, but the warning of FR-29 applies to the effective `PATH`.
+- FR-57: Environment variables are applied with bubblewrap's `--clearenv`/`--setenv`
   (or equivalent), not by modifying the tool's own environment.
+- FR-58: Because `--env` values and `--env-file` contents may be secrets, the tool
+  **MUST NOT** print values in normal output, error messages, or `--debug` output (names
+  only; values are shown as `***`). `--dry-run` also masks values. An `--env-file`
+  that is readable by group or others **SHOULD** trigger a warning on stderr.
 
 ### 6.5 Lifecycle and cleanup
 
@@ -494,12 +514,21 @@ Run A creates `x`. Run B (`-j` on the same path) sees `x`. `diff` shows `x` as a
 While one session on `~/proj` is running, a second `run -j ~/proj` exits with 125.
 `merge ~/proj` exits with 1.
 
-**AC-11: Environment restriction (FR-51 to FR-54)**
+**AC-11: Environment restriction (FR-51 to FR-55)**
 ```
 FOO=1 BAR=2 agent-sandbox run --env FOO -- env
 ```
 Output contains `FOO` and the baseline variables (`PATH`, ...), and does not contain
 `BAR`. Without `--env`, both are present.
+
+**AC-11b: Explicit values (FR-53 to FR-58)**
+```
+printf '# comment\nA=from file\nB=x=y # kept\nC=\nFOO\n' > env.txt
+FOO=host BAR=2 agent-sandbox run --env-file env.txt --env A=cli -- env
+```
+Output contains `A=cli` (later entry wins), `B=x=y # kept`, `C=` (empty), `FOO=host`,
+the baseline variables, and not `BAR`. `--env 'X=a b'` yields `X=a b` inside the
+sandbox. `--env 1BAD=x` exits with 2. `--dry-run` shows `***` instead of values.
 
 **AC-12: Network (FR-21)**
 `run --no-network -- <program that connects out>` fails to connect. Without the flag it
@@ -538,9 +567,7 @@ These are not decided yet. Defaults below apply until they are.
    configuration. Should there be a curated allowlist? *Default: whole `/etc`.*
 3. **Terminal injection:** bwrap's `--new-session` protects against `TIOCSTI` input
    injection but breaks job control in interactive shells. *Default: not used. Revisit.*
-4. **Explicit variable values:** support `--env NAME=VALUE` to set values? *Default: not
-   in v0.1.*
-5. **Garbage collection:** should there be a command to list or remove stale state of
+4. **Garbage collection:** should there be a command to list or remove stale state of
    paths that no longer exist? *Default: `listdiffs` + `discard` are enough.*
-6. **Other layouts:** Guix, Gentoo Prefix, or similar are out of scope for v0.1 but
+5. **Other layouts:** Guix, Gentoo Prefix, or similar are out of scope for v0.1 but
    FR-28 keeps the door open.
