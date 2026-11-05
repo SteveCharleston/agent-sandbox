@@ -34,6 +34,8 @@ location (`merge`) or throw them away (`discard`).
 - G3: Support standard FHS Linux distributions and NixOS.
 - G4: Provide transparent, reviewable write isolation via fuse-overlayfs.
 - G5: Be a plain CLI with no daemon, no config file requirement, no interactive UI.
+- G6: Work entirely as an unprivileged user. No root account, `sudo`, or other privilege
+  escalation is needed to install configuration, run, review, merge, or discard (see 9.1).
 
 ### Non-Goals
 
@@ -342,7 +344,7 @@ directories is always shared **read-only**.
   replaced directories are represented the way fuse-overlayfs does it (whiteouts and
   opaque directories). `diff`, `listdiffs`, `merge`, and `discard` **MUST** interpret
   that representation correctly.
-- FR-73: Overlays are mounted by the unprivileged user. No root, no `sudo`.
+- FR-73: Overlays are mounted by the unprivileged user. No root, no `sudo` (see 9.1).
 - FR-74: The overlay mount happens outside the sandbox on the host, in a private
   directory inside the state directory with mode `0700`, and only the merged view
   is bind-mounted into the sandbox.
@@ -385,7 +387,41 @@ directories is always shared **read-only**.
 - FR-85: A lock (`flock` or PID file) protects each jailed path while a session runs.
   `merge` and `discard` take the same lock. Stale locks of dead processes are ignored.
 
-## 9. Host Requirements and Error Handling
+## 9. Unprivileged Operation, Host Requirements and Error Handling
+
+### 9.1 Unprivileged operation
+
+Every function of the tool **MUST** work for a normal, unprivileged user.
+
+- FR-95: No subcommand (`run`, `diff`, `listdiffs`, `merge`, `discard`) requires root,
+  `sudo`, `su`, `doas`, polkit, or any other privilege escalation, and the tool **MUST
+  NOT** invoke any of them.
+- FR-96: The sandbox relies on unprivileged user namespaces. `bwrap` **MUST** work
+  without being installed setuid-root (a setuid `bwrap` is allowed but not required).
+- FR-97: fuse-overlayfs is mounted and unmounted by the unprivileged user via FUSE
+  (`fuse-overlayfs` and `fusermount3`). Kernel overlayfs mounts via `mount(8)` as root
+  are never used. A setuid `fusermount3` as shipped by distributions is accepted,
+  because the tool invokes it as the normal user.
+- FR-98: All files the tool creates (state, locks, temporary mount points) live in
+  directories owned by the invoking user: the state directory (see 8.1) and the private
+  mount directory inside it (FR-74). No system directories are modified, and nothing is
+  installed system-wide at runtime.
+- FR-99: Files created by `merge` are owned by the invoking user and written with the
+  mode recorded in the upper layer, restricted to what an unprivileged user can
+  set. Ownership changes (`chown`) to other users are never attempted.
+- FR-100: If the tool is started as root (uid 0), it **MAY** run, but behavior is
+  not guaranteed and a warning is printed to stderr. Support for root is not a
+  goal.
+- FR-101: Setup that needs administrator rights (installing `bwrap`/`fuse-overlayfs`,
+  enabling user namespaces via sysctl, `/etc/fuse.conf` settings, `/etc/subuid`) is
+  a prerequisite documented in the README. It is outside the tool. Error messages
+  for missing prerequisites **MUST** point to that documentation instead of
+  suggesting `sudo` commands to run automatically.
+- FR-102: The test suite and the code quality tools run without root. Integration
+  tests that need user namespaces are skipped if unavailable (NFR-12) and never
+  attempt to escalate privileges.
+
+### 9.2 Host requirements and error handling
 
 - FR-90: `run` **MUST** check at startup that `bwrap` is available (and, if any `-j` is
   used, also `fuse-overlayfs` and `fusermount3`/`fusermount`). A missing dependency
@@ -550,6 +586,13 @@ inside the sandbox.
 **AC-16: Cleanup (FR-61)**
 After any `run` finishes (including `kill -TERM` of the tool), `mount | grep fuse-overlayfs`
 shows no leftover mounts for it, and the upper layers still hold their changes.
+
+**AC-16b: Unprivileged operation (FR-95 to FR-102)**
+As a regular user in a fresh session (no `sudo` credentials cached, no `CAP_SYS_ADMIN`),
+every example above (AC-1 to AC-16) works. `strace -f -e trace=execve` of a full
+`run -j` / `diff` / `merge` cycle shows no execution of `sudo`, `su`, `doas`, or `pkexec`.
+No file outside the state directory and the explicit mount spec paths is created or
+modified.
 
 **AC-17: Code quality (10.2, 10.3)**
 `uv run black --check . && uv run isort --check . && uv run flake8 && uv run pylint src tests && uv run mypy src tests && uv run pytest`
