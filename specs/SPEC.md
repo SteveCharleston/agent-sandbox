@@ -245,13 +245,16 @@ directories is always shared **read-only**.
   **MUST** be recreated as the same symlink instead of being bind-mounted.
 - FR-27: **NixOS layout** system mounts: `/nix/store`, `/run/current-system`,
   `/etc` (including the symlink targets in `/etc/static`), `/run/wrappers`, and
-  whichever of `/bin/sh` and `/usr/bin/env` exist. Symlinks into `/nix/store` or
-  `/run/current-system` **MUST** resolve inside the sandbox.
+  `/bin` and `/usr` (whichever exist; on NixOS they only hold symlinks such as
+  `/bin/sh` and `/usr/bin/env` into the store). Symlinks into `/nix/store` or
+  `/run/current-system` **MUST** resolve inside the sandbox. (Verified in
+  [NOTES.md](NOTES.md).)
 - FR-28: The system mount sets are data-driven (declared as tables in code), so adding a
   layout does not require changing control flow.
 - FR-29: `$PATH` entries that are not visible in the sandbox (for example
-  `~/.local/bin`) **SHOULD** produce a warning on stderr listing the missing entries. The
-  user can then add them with `-r`.
+  `~/.local/bin`) **SHOULD** produce a warning on stderr listing the missing entries,
+  without duplicates (real `$PATH` values often repeat entries). The user can then add
+  them with `-r`.
 - FR-30: If a mount spec or `--chdir` targets a path inside a system mount, it is
   allowed. `-w` or `-j` on a path inside a system mount **MUST** be rejected
   (exit 125), because system mounts are read-only by design.
@@ -277,8 +280,11 @@ directories is always shared **read-only**.
   directory** of the file, and only that file from the merged view is bind-mounted into
   the sandbox at the original path. Sibling files are not exposed. The state is keyed
   by the file's own path, so `diff`/`merge`/`discard` take the file path. Known
-  limitation (document in `--help`): programs that replace the file by rename
-  (write temp file then `rename()`) fail on a bind-mounted file with `EBUSY`.
+  limitations (document in `--help`): (a) programs that replace or remove the file
+  (write temp file then `rename()` over it, or `unlink()`) fail on the bind-mounted file
+  with `EBUSY`; (b) new files that a program creates next to the jailed file are not part
+  of the overlay and are lost when the sandbox exits (or fail if the parent directory is
+  not writable in the sandbox).
 - FR-38: Mount specs are applied in order of path depth (shallow first), so nested
   specs overlay their parents deterministically regardless of the order on the command
   line.
@@ -343,7 +349,14 @@ directories is always shared **read-only**.
 - FR-72: Every change is stored in the upper layer in the state directory. Deletions and
   replaced directories are represented the way fuse-overlayfs does it (whiteouts and
   opaque directories). `diff`, `listdiffs`, `merge`, and `discard` **MUST** interpret
-  that representation correctly.
+  that representation correctly. Observed representation (see [NOTES.md](NOTES.md)):
+  whiteouts are character devices 0:0, opaque directories carry the xattr
+  `user.fuseoverlayfs.opaque` and a marker file `.wh..wh..opq` that is never reported
+  or merged. Newly created directories are opaque too, so "opaque" does not mean
+  "existed in lower". The upper layer may also contain unchanged copy-ups (for
+  example after `touch`), so a change **MUST** be determined by comparing with the
+  lower layer (content, mode, type, symlink target), not by presence in the upper layer.
+  `user.fuseoverlayfs.*` xattrs are never copied by `merge`.
 - FR-73: Overlays are mounted by the unprivileged user. No root, no `sudo` (see 9.1).
 - FR-74: The overlay mount happens outside the sandbox on the host, in a private
   directory inside the state directory with mode `0700`, and only the merged view
