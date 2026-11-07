@@ -33,6 +33,7 @@ src/agent_sandbox/
     __init__.py      # __version__
     __main__.py      # python -m agent_sandbox
     cli.py           # argparse setup, run-argument splitting, dispatch, exit codes
+    options.py       # typed parse results: RunOptions, DiffOptions, ... (one per subcommand)
     errors.py        # SandboxError hierarchy mapped to exit codes
     envspec.py       # --env / --env-file parsing, environment building (6.4)
     layout.py        # host layout detection and system mount tables (6.2)

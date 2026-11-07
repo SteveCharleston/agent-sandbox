@@ -108,6 +108,14 @@ agent-sandbox [--help] [--version] <subcommand> [options] [arguments]
 - FR-5: Output intended for machine consumption (`listdiffs`, `diff`) goes to stdout.
   Diagnostics, warnings, and errors go to stderr.
 
+Options common to all subcommands:
+
+| Option | Meaning |
+|--------|---------|
+| `-h`, `--help` | Show help for the subcommand (FR-1). |
+| `--debug` | Show detailed steps and tracebacks on stderr (FR-92, FR-93). Also accepted before the subcommand (`agent-sandbox --debug run ...`). |
+| `--state-dir DIR` | Override the state directory (FR-80). |
+
 ### 5.2 `run`
 
 ```
@@ -140,7 +148,10 @@ agent-sandbox run [options] [--] PROGRAM [ARGS...]
 - FR-6: Mount flags and options **MUST** be parsed only up to the first argument that is
   not a recognized option (or its value). That argument and everything after it is the
   program and its arguments, passed verbatim. Example: in
-  `agent-sandbox run -r ~/f -j ~/p /bin/bash -l`, `-l` belongs to `bash`.
+  `agent-sandbox run -r ~/f -j ~/p /bin/bash -l`, `-l` belongs to `bash`. An argument
+  before the program that starts with `-` but is not a known option is a usage error
+  (exit 2), so a mistyped option is never executed as the program. A program whose
+  name starts with `-` must follow `--`.
 - FR-7: A literal `--` **MUST** end option parsing explicitly. Everything after it is
   the program and its arguments, even if it looks like a flag. Example:
   `agent-sandbox run -j ~/p -- /bin/prog -j -w -v -r`.
@@ -148,13 +159,24 @@ agent-sandbox run [options] [--] PROGRAM [ARGS...]
 - FR-9: If `PROGRAM` contains no `/`, it **MUST** be resolved via `$PATH` as seen inside
   the sandbox. If resolution fails, `run` fails with a clear message (exit 127, see 5.6).
 - FR-10: Short flags **MUST** accept both `-r PATH` and `-rPATH`. Long flags **MUST**
-  accept both `--ro PATH` and `--ro=PATH`.
+  accept both `--ro PATH` and `--ro=PATH`. Further rules:
+  - `-r=PATH` is treated like `-rPATH` with the `=` removed (argparse convention).
+  - The argument after an option that takes a value is always that value, even if it
+    starts with `-` (`-r -x` mounts the path `-x`; `-r -- prog` mounts the path `--`).
+    Empty values (`--ro=`) are passed on and rejected later by validation.
+  - Long options **MUST** be spelled out completely. Abbreviations (`--jai`) are
+    unknown options (usage error).
+  - These rules apply to the options of every subcommand, not only `run`.
 
 ### 5.3 `diff`
 
 ```
-agent-sandbox diff [options] PATH
+agent-sandbox diff [--stat] [--state-dir DIR] [--debug] PATH
 ```
+
+| Option | Meaning |
+|--------|---------|
+| `--stat` | Print a summary instead of the full diff (FR-15). |
 
 - FR-11: Prints pending changes for the jailed path `PATH` as a unified diff to stdout.
 - FR-12: The diff **MUST** cover: modified text files, added files, deleted files,
@@ -169,7 +191,7 @@ agent-sandbox diff [options] PATH
 ### 5.4 `listdiffs`
 
 ```
-agent-sandbox listdiffs [options]
+agent-sandbox listdiffs [--state-dir DIR] [--debug]
 ```
 
 - FR-16: Lists all jailed paths that currently have pending changes, one per line:
@@ -181,9 +203,14 @@ agent-sandbox listdiffs [options]
 ### 5.5 `merge` and `discard`
 
 ```
-agent-sandbox merge [options] PATH
-agent-sandbox discard [options] PATH
+agent-sandbox merge [-y] [--dry-run] [--state-dir DIR] [--debug] PATH
+agent-sandbox discard [-y] [--state-dir DIR] [--debug] PATH
 ```
+
+| Option | Meaning |
+|--------|---------|
+| `-y`, `--yes` | Do not ask for confirmation (FR-40, FR-44). |
+| `--dry-run` | `merge` only: show what would change, modify nothing (FR-41). |
 
 - FR-40: `merge` copies all pending changes for `PATH` to the real path: new and modified
   files are copied (preserving mode, mtime, and symlinks), deletions are applied,
@@ -372,9 +399,9 @@ directories is always shared **read-only**.
 
 ### 8.1 State directory
 
-- FR-80: State lives in `$AGENT_SANDBOX_STATE_DIR` if set, else `--state-dir`, else
-  `$XDG_STATE_HOME/agent-sandbox`, else `~/.local/state/agent-sandbox`. Precedence,
-  highest first: `--state-dir`, `$AGENT_SANDBOX_STATE_DIR`, XDG default.
+- FR-80: The state directory is, in order of precedence: `--state-dir` if given, else
+  `$AGENT_SANDBOX_STATE_DIR` if set, else `$XDG_STATE_HOME/agent-sandbox` if
+  `$XDG_STATE_HOME` is set, else `~/.local/state/agent-sandbox`.
 - FR-81: Layout per jailed path (identified by the SHA-256 of its absolute resolved path
   as directory name `<id>`):
 
