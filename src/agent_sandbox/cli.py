@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import NoReturn
 
 from agent_sandbox import __version__
+from agent_sandbox.envspec import resolve_env_args
+from agent_sandbox.errors import AgentSandboxError, ExitCode
 from agent_sandbox.options import (
     Command,
     DiffOptions,
@@ -22,10 +24,6 @@ from agent_sandbox.options import (
 )
 
 PROG = "agent-sandbox"
-
-EXIT_OK = 0
-EXIT_ERROR = 1
-EXIT_USAGE = 2
 
 MAIN_DESCRIPTION = """\
 Run AI agents and other programs in a bubblewrap sandbox. The program sees only
@@ -208,7 +206,7 @@ class _ArgumentParser(argparse.ArgumentParser):
 
     def error(self, message: str) -> NoReturn:
         self.print_usage(sys.stderr)
-        self.exit(EXIT_USAGE, f"{PROG}: error: {message}\n")
+        self.exit(ExitCode.USAGE, f"{PROG}: error: {message}\n")
 
 
 @dataclass(frozen=True)
@@ -553,15 +551,21 @@ def parse_command(argv: Sequence[str]) -> Command:
 def _exit_code(exc: SystemExit) -> int:
     """Translate a ``SystemExit`` raised by argparse into an exit code."""
     if exc.code is None:
-        return EXIT_OK
+        return ExitCode.OK
     if isinstance(exc.code, int):
         return exc.code
-    return EXIT_USAGE
+    return ExitCode.USAGE
+
+
+def warn(message: str) -> None:
+    """Print a warning to stderr."""
+    print(f"{PROG}: warning: {message}", file=sys.stderr)
 
 
 def _dispatch(command: Command) -> int:
-    print(f"{PROG}: error: '{command.name}' is not implemented yet", file=sys.stderr)
-    return EXIT_ERROR
+    if isinstance(command, RunOptions):
+        resolve_env_args(command.env, warn)
+    raise AgentSandboxError(f"'{command.name}' is not implemented yet")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -570,4 +574,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         command = parse_command(sys.argv[1:] if argv is None else argv)
     except SystemExit as exc:
         return _exit_code(exc)
-    return _dispatch(command)
+    try:
+        return _dispatch(command)
+    except AgentSandboxError as exc:
+        print(f"{PROG}: error: {exc}", file=sys.stderr)
+        return exc.exit_code

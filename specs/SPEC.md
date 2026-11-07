@@ -336,10 +336,15 @@ directories is always shared **read-only**.
     spaces, or `#`. `NAME=` sets `NAME` to the empty string.
   - `NAME` must match `[A-Za-z_][A-Za-z0-9_]*`. Invalid entries are an error (exit 2),
     with the file name and line number for `--env-file`.
+  - A `VALUE` containing a NUL character cannot be passed to a process and is an
+    error (exit 2).
 - FR-54: `--env-file` format: one entry per line. Blank lines and lines whose first
   non-whitespace character is `#` are ignored. Leading whitespace before `NAME` and
   trailing whitespace after a bare `NAME` are trimmed. For `NAME=VALUE`, whitespace in
-  `VALUE` is preserved. A file that cannot be read is an error (exit 2).
+  `VALUE` is preserved. Lines end with LF; a CRLF line ending is accepted and the CR
+  is not part of the value. The file is decoded like other file system data
+  (`os.fsdecode`, UTF-8 with `surrogateescape`), so arbitrary bytes in values are
+  passed on unchanged. A file that cannot be read is an error (exit 2).
 - FR-55: `--env` and `--env-file` can be combined and repeated. They are processed in
   command-line order. If a name occurs more than once, the **last** occurrence wins
   (so a later `NAME=VALUE` overrides an earlier `NAME`, and the other way round).
@@ -352,6 +357,10 @@ directories is always shared **read-only**.
   **MUST NOT** print values in normal output, error messages, or `--debug` output (names
   only; values are shown as `***`). `--dry-run` also masks values. An `--env-file`
   that is readable by group or others **SHOULD** trigger a warning on stderr.
+  Error messages identify an invalid entry by its source (`--env #N` for the N-th
+  `--env` option, or file name and line number) and show the name only if the entry
+  contains `=`. Values and invalid entries without `=` are never echoed, because they
+  may be secrets pasted by mistake.
 
 ### 6.5 Lifecycle and cleanup
 
