@@ -270,6 +270,10 @@ directories is always shared **read-only**.
   `/usr`, `/bin`, `/sbin`, `/lib`, `/lib32`, `/lib64`, `/libx32`, `/opt`, and `/etc`.
   If one of `/bin`, `/sbin`, `/lib*` is a symlink to `usr/...` (merged-`/usr`), it
   **MUST** be recreated as the same symlink instead of being bind-mounted.
+  General rule for all layouts: a system path that is a symlink is recreated as the same
+  symlink if its target lies inside another system path that is bind-mounted. Otherwise
+  the symlink's target is bind-mounted at the system path, or the path is skipped if the
+  target does not exist.
 - FR-27: **NixOS layout** system mounts: `/nix/store`, `/run/current-system`,
   `/etc` (including the symlink targets in `/etc/static`), `/run/wrappers`, and
   `/bin` and `/usr` (whichever exist; on NixOS they only hold symlinks such as
@@ -290,7 +294,14 @@ directories is always shared **read-only**.
 
 - FR-31: Every mount spec path is made absolute and symlinks are resolved. The path
   appears inside the sandbox at the same absolute path as on the host
-  ("transparent paths").
+  ("transparent paths"). A leading `~` or `~user` is expanded, because the shell does
+  not expand it in forms like `--ro=~/x`. Relative paths are relative to the current
+  directory. The mount appears at the resolved path. If the given (absolute, unresolved)
+  path differs because it contains symlinks, it is recreated inside the sandbox as a
+  symlink to the resolved path, unless that location is already covered by another
+  mount. This keeps both spellings working, for example when `~/project` is a symlink
+  and also the working directory. Error messages show the given path and the resolved
+  path.
 - FR-32: A mount spec path that does not exist is an error (exit 125). Directories
   and files are both valid for `-r` and `-w`.
 - FR-33: Parent directories of mount points are created as empty directories in the
@@ -314,7 +325,13 @@ directories is always shared **read-only**.
   not writable in the sandbox).
 - FR-38: Mount specs are applied in order of path depth (shallow first), so nested
   specs overlay their parents deterministically regardless of the order on the command
-  line.
+  line. System mounts and mount specs are ordered together by the same rule.
+- FR-39: The state directory (8.1) **MUST NEVER** be visible inside the sandbox, because
+  writing to it directly would bypass review: the program could change any jail's upper
+  layer, and those changes would later be merged into paths it was never given. A mount
+  spec on or inside the state directory is an error (exit 125). If a mount spec contains
+  the state directory (for example `-w ~`), the state directory is hidden with an empty
+  read-only tmpfs.
 
 ### 6.4 Environment
 

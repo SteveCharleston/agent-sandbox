@@ -24,3 +24,9 @@ class UsageError(AgentSandboxError):
     """Invalid command-line arguments or input files given on the command line."""
 
     exit_code = ExitCode.USAGE
+
+
+class SetupError(AgentSandboxError):
+    """``run`` could not set up the sandbox, for example because of an invalid mount spec."""
+
+    exit_code = ExitCode.SETUP_FAILED

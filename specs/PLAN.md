@@ -147,7 +147,7 @@ restricted mode triggered by `NAME=VALUE` only.
 
 ## Step 4: Layout Detection and Mount Model
 
-**Spec:** FR-25 to FR-28, FR-30 to FR-35, FR-38
+**Spec:** FR-25 to FR-28, FR-30 to FR-35, FR-38, FR-39 (error rule), FR-94 (file types)
 
 **Tasks**
 - `layout.py`: `detect_layout(root: Path) -> Layout` (`/etc/NIXOS`,
@@ -156,7 +156,9 @@ restricted mode triggered by `NAME=VALUE` only.
 - Merged-`/usr` symlink handling: classify entries as `bind` or `symlink` (FR-26).
 - `mounts.py`: `MountSpec(path, mode)`, resolution of paths (absolute, symlinks
   resolved, FR-31), existence checks (FR-32), duplicate and conflict rules (FR-34,
-  FR-35), forbidding `-w`/`-j` inside system mounts (FR-30), ordering by depth (FR-38).
+  FR-35), forbidding `-w`/`-j` inside system mounts (FR-30), ordering by depth (FR-38),
+  forbidding mount specs on or inside the state directory (FR-39; the directory is a
+  parameter here and gets resolved in Step 5).
 - Detect unsupported file types (socket, device, FR-94).
 
 **Tests (unit):** fake FHS and fake NixOS trees, merged-`/usr`, nested mounts, same path
@@ -170,14 +172,19 @@ plan is produced.
 
 ## Step 5: bwrap Command Builder and `run` Without `-j`
 
-**Spec:** FR-9, FR-20 to FR-24, FR-29, FR-90 to FR-93, FR-96, `--dry-run`, `--chdir`,
+**Spec:** FR-9, FR-20 to FR-24, FR-29, FR-38, FR-39, FR-80, FR-90 to FR-93, FR-96, `--dry-run`, `--chdir`,
 `--no-network`, exit codes (5.6)
 
 **Tasks**
 - `bwrap.py`: pure function `build_command(plan, env, options) -> list[str]`: namespaces,
   `--die-with-parent`, `--proc`, `--dev`, tmpfs `/tmp`, tmpfs `$HOME`, system mounts,
   `--ro-bind` / `--bind` for specs, `--clearenv` / `--setenv` (FR-57), `--chdir`,
-  `--unshare-net`, then `--` and the program.
+  `--unshare-net`, then `--` and the program. System mounts and mount specs are sorted
+  together by depth (FR-38). Recreate `MountSpec.aliases` as symlinks to the resolved
+  path unless their location is already covered by another mount (FR-31).
+- State directory location (FR-80) as a pure function (moved here from Step 6, because
+  FR-39 needs it): pass it to the mount plan and hide it with a read-only tmpfs when a
+  mount spec contains it (FR-39).
 - `deps.py`: check for `bwrap` (and later fuse tools), user-namespace failure
   detection with a helpful message (FR-90, FR-91).
 - `session.py`: run `bwrap` with passthrough stdio, forward `SIGINT`/`SIGTERM`/`SIGHUP`,
@@ -204,7 +211,7 @@ without overlay.
 **Spec:** FR-36, FR-37, FR-60 to FR-63, FR-70 to FR-76, FR-80 to FR-85, FR-97, FR-98
 
 **Tasks**
-- `state.py`: state directory resolution and precedence (FR-80), jail id from the SHA-256
+- `state.py`: state directory layout (location from Step 5), jail id from the SHA-256
   of the resolved path, `meta.json` with version (FR-81, FR-83), `0700` permissions
   (FR-82), path normalization (FR-84).
 - Locking with `flock` and the owner PID, stale lock detection, and a clear message for
