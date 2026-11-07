@@ -30,3 +30,9 @@ class SetupError(AgentSandboxError):
     """``run`` could not set up the sandbox, for example because of an invalid mount spec."""
 
     exit_code = ExitCode.SETUP_FAILED
+
+
+class ProgramNotFoundError(AgentSandboxError):
+    """The program to run does not exist inside the sandbox (FR-9)."""
+
+    exit_code = ExitCode.NOT_FOUND

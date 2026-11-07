@@ -346,6 +346,6 @@ def test_fr58_cli_warns_about_readable_env_file(
 ) -> None:
     """FR-58: the warning goes to stderr with the ``agent-sandbox: warning:`` prefix."""
     path = write_env_file(tmp_path / "env", "A=1\n", 0o644)
-    assert main(["run", "--env-file", str(path), "prog"]) == 1
+    assert main(["run", "--dry-run", "--env-file", str(path), "sh"]) == 0
     err = capsys.readouterr().err
     assert f"agent-sandbox: warning: env file {path} is readable by group or others" in err

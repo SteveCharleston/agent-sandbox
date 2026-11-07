@@ -193,7 +193,6 @@ def test_fr93_debug_before_subcommand(argv: list[str]) -> None:
 @pytest.mark.parametrize(
     ("argv", "name"),
     [
-        (["run", "prog"], "run"),
         (["diff", "/p"], "diff"),
         (["listdiffs"], "listdiffs"),
         (["merge", "/p"], "merge"),
@@ -203,7 +202,7 @@ def test_fr93_debug_before_subcommand(argv: list[str]) -> None:
 def test_subcommands_are_not_implemented_yet(
     capsys: pytest.CaptureFixture[str], argv: list[str], name: str
 ) -> None:
-    """Step 2 stubs: every subcommand reports that it is not implemented and exits with 1."""
+    """Stubs: subcommands not implemented yet report it and exit with 1."""
     assert main(argv) == 1
     captured = capsys.readouterr()
     assert captured.out == ""

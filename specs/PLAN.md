@@ -38,7 +38,9 @@ src/agent_sandbox/
     envspec.py       # --env / --env-file parsing, environment building (6.4)
     layout.py        # host layout detection and system mount tables (6.2)
     mounts.py        # MountSpec model, path resolution, validation (6.3)
-    bwrap.py         # pure bwrap argument builder
+    bwrap.py         # sandbox plan and pure bwrap argument builder
+    programs.py      # program lookup and PATH visibility (FR-9, FR-29)
+    supervisor.py    # spawning bwrap, signal forwarding, exit status (FR-23, FR-24)
     deps.py          # dependency and user-namespace checks (9.2)
     state.py         # state dir, jail ids, meta.json, locking (8)
     overlay.py       # fuse-overlayfs mount/unmount (7)
@@ -299,6 +301,7 @@ AC-1 to AC-17
 - Walk through section 11 and make sure every AC has an automated test (unit or
   integration), and every FR has at least one test referencing it (NFR-13). Add a
   small script or test that fails if an FR ID from the spec is not referenced in `tests/`.
+- Seccomp filter against `TIOCSTI`/`TIOCLINUX` on hosts that still allow them (FR-24b).
 - Edge cases from FR-94: unreadable paths, sockets and devices, filesystems that don't
   support overlay upper layers, unwritable state directory, symlink loops. Warn when
   started as root (FR-100).

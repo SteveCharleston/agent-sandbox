@@ -1,13 +1,14 @@
 """Command-line interface of agent-sandbox."""
 
 import argparse
+import signal
 import sys
+import traceback
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import NoReturn
 
-from agent_sandbox import __version__
-from agent_sandbox.envspec import resolve_env_args
+from agent_sandbox import __version__, session
 from agent_sandbox.errors import AgentSandboxError, ExitCode
 from agent_sandbox.options import (
     Command,
@@ -562,9 +563,17 @@ def warn(message: str) -> None:
     print(f"{PROG}: warning: {message}", file=sys.stderr)
 
 
+def _debug_logger(enabled: bool) -> Callable[[str], None]:
+    def debug(message: str) -> None:
+        if enabled:
+            print(f"{PROG}: debug: {message}", file=sys.stderr)
+
+    return debug
+
+
 def _dispatch(command: Command) -> int:
     if isinstance(command, RunOptions):
-        resolve_env_args(command.env, warn)
+        return session.run(command, warn=warn, debug=_debug_logger(command.debug))
     raise AgentSandboxError(f"'{command.name}' is not implemented yet")
 
 
@@ -577,5 +586,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         return _dispatch(command)
     except AgentSandboxError as exc:
+        if command.debug:
+            traceback.print_exc()
         print(f"{PROG}: error: {exc}", file=sys.stderr)
         return exc.exit_code
+    except KeyboardInterrupt:
+        return 128 + signal.SIGINT
+    # FR-92: unexpected errors are reported in one line; the traceback only with --debug.
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        if command.debug:
+            traceback.print_exc()
+        hint = "" if command.debug else " (run with --debug for details)"
+        print(f"{PROG}: error: unexpected {type(exc).__name__}: {exc}{hint}", file=sys.stderr)
+        return ExitCode.SETUP_FAILED if isinstance(command, RunOptions) else ExitCode.ERROR
