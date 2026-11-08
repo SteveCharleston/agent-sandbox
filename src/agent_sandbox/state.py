@@ -108,9 +108,15 @@ def make_private_dir(path: str) -> None:
 
 def make_jail_root(state_dir: str, jail: JailDir) -> None:
     """Create the state directory and the jail's root directory, all with mode 0700."""
-    os.makedirs(os.path.dirname(state_dir), exist_ok=True)
-    for path in (state_dir, os.path.dirname(jail.root), jail.root):
-        make_private_dir(path)
+    try:
+        os.makedirs(os.path.dirname(state_dir), exist_ok=True)
+        for path in (state_dir, os.path.dirname(jail.root), jail.root):
+            make_private_dir(path)
+    except OSError as exc:
+        raise SetupError(
+            f"cannot create the state directory {exc.filename}: {exc.strerror}; choose "
+            "another location with --state-dir or $AGENT_SANDBOX_STATE_DIR"
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -144,7 +150,9 @@ def read_meta(jail: JailDir) -> JailMeta | None:
         )
     except FileNotFoundError:
         return None
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except OSError as exc:
+        raise SetupError(f"cannot read {jail.meta}: {exc.strerror}") from exc
+    except (ValueError, KeyError, TypeError) as exc:
         raise SetupError(f"corrupt state in {jail.root}: cannot read meta.json ({exc})") from exc
 
 
@@ -190,7 +198,10 @@ def locked(
 
     The kernel releases the lock when the process dies, so it can never be stale.
     """
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    except OSError as exc:
+        raise error(f"cannot open the lock file {path}: {exc.strerror}") from exc
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -202,6 +213,25 @@ def locked(
         os.ftruncate(fd, 0)
         os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
         yield
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def lock_if_free(path: str) -> Iterator[bool]:
+    """Hold the lock on ``path`` if nobody else does; yields whether it is held."""
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    except OSError:
+        yield False
+        return
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
     finally:
         os.close(fd)
 

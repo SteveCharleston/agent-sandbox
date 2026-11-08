@@ -15,7 +15,7 @@ from agent_sandbox.options import DiscardOptions, MergeOptions
 from agent_sandbox.overlay import is_mounted, unmount_overlay
 from agent_sandbox.pending import Pending, find_pending, normalize_path
 from agent_sandbox.state import locked, remove_jail, state_dir_location
-from agent_sandbox.upper import Change, ChangeKind, EntryType
+from agent_sandbox.upper import Change, ChangeKind, EntryType, readable_tree
 
 Output = Callable[[str], None]
 
@@ -47,7 +47,7 @@ def check_mergeable(changes: Iterable[Change]) -> None:
 
 
 def conflicts(changes: Iterable[Change]) -> list[str]:
-    """Files changed on the host after the sandbox changed them (open question 1).
+    """Files changed on the host after the sandbox changed them (FR-47).
 
     A modified file or symlink whose host version is newer than the pending version.
     """
@@ -60,8 +60,7 @@ def conflicts(changes: Iterable[Change]) -> list[str]:
             continue
         if os.lstat(old.path).st_mtime_ns > os.lstat(new.path).st_mtime_ns:
             result.append(
-                f"{quote_path(change.path)} changed on the host after the sandbox changed it; "
-                "merging replaces the host's version"
+                f"{quote_path(change.path)} changed on the host after the sandbox changed it"
             )
     return result
 
@@ -70,14 +69,18 @@ def _temporary_name(directory: str) -> str:
     return os.path.join(directory, _TEMPORARY_PREFIX + secrets.token_hex(8))
 
 
-def _replace_file(source: str, target: str) -> None:
-    """Copy ``source`` over ``target`` atomically, with its mode and times (FR-40, FR-99)."""
+def _replace_file(source: str, target: str, mode: int) -> None:
+    """Copy ``source`` over ``target`` atomically, with ``mode`` and its times (FR-40, FR-99).
+
+    ``mode`` is the pending version's mode as recorded, not the (possibly temporarily
+    opened) mode of ``source``.
+    """
     temporary = _temporary_name(os.path.dirname(target))
     try:
         with open(source, "rb") as reader, open(temporary, "xb") as writer:
             shutil.copyfileobj(reader, writer)
         info = os.lstat(source)
-        os.chmod(temporary, stat.S_IMODE(info.st_mode))
+        os.chmod(temporary, mode)
         os.utime(temporary, ns=(info.st_atime_ns, info.st_mtime_ns))
         os.replace(temporary, target)
     except BaseException:
@@ -148,7 +151,7 @@ class _Merger:
         elif new is not None and old is not None and filecmp.cmp(old.path, new.path, False):
             os.chmod(target, new.mode)
         elif new is not None:
-            _replace_file(new.path, target)
+            _replace_file(new.path, target, new.mode)
         self.report(_report_line(change))
 
     def finish(self, success: bool) -> None:
@@ -205,32 +208,59 @@ def _summary(title: str, changes: list[Change]) -> str:
     return f"{title}\n{format_stat(changes)}"
 
 
+def _check_conflicts(changes: list[Change], io: Io, *, force: bool, dry_run: bool) -> None:
+    """Warn about conflicts; without ``--force`` a real merge refuses (FR-47)."""
+    found = conflicts(changes)
+    for conflict in found:
+        io.warn(f"conflict: {conflict}")
+    if not found or force:
+        return
+    if dry_run:
+        io.warn(f"merge would refuse because of {len(found)} conflicts; --force overrides this")
+        return
+    raise AgentSandboxError(
+        f"{len(found)} conflicts: the host changed these files after the sandbox did; "
+        "nothing was changed. Use --force to replace the host's versions"
+    )
+
+
 def merge(options: MergeOptions, io: Io, *, host_env: Mapping[str, str], cwd: str) -> int:
     """``agent-sandbox merge`` (FR-40 to FR-43, FR-45, FR-46)."""
     pending = _find(options.state_dir, options.path, host_env, cwd)
     path = pending.meta.path
     if options.dry_run:
-        changes = pending.changes()
+        with pending.reading() as modes:
+            changes = pending.changes(modes)
         check_mergeable(changes)
-        for warning in conflicts(changes):
-            io.warn(warning)
+        _check_conflicts(changes, io, force=options.force, dry_run=True)
         if changes:
             io.out(_summary(f"Changes that merge would apply to {path}:", changes))
         return 0
     with locked(pending.jail.lock, path, AgentSandboxError):
         _cleanup_stale_mount(pending, host_env)
-        changes = pending.changes()
-        check_mergeable(changes)
-        for warning in conflicts(changes):
-            io.warn(warning)
-        if changes and not options.yes:
-            io.out(_summary(f"Changes to apply to {path}:", changes))
-            if not io.ask(f"Apply these {len(changes)} changes to {path}? [y/N] "):
-                raise AgentSandboxError("merge cancelled; nothing was changed")
-        apply_changes(pending.lower, changes, io.out)
-        remove_jail(pending.jail)
+        with readable_tree(pending.jail.upper) as modes:
+            changes = pending.changes(modes)
+            check_mergeable(changes)
+            _check_conflicts(changes, io, force=options.force, dry_run=False)
+            if changes and not options.yes:
+                io.out(_summary(f"Changes to apply to {path}:", changes))
+                if not io.ask(f"Apply these {len(changes)} changes to {path}? [y/N] "):
+                    raise AgentSandboxError("merge cancelled; nothing was changed")
+            apply_changes(pending.lower, changes, io.out)
+        _remove_state(pending, f"merged into {path}")
     io.out(f"Merged {len(changes)} changes into {path}.\n")
     return 0
+
+
+def _remove_state(pending: Pending, done: str) -> None:
+    """Remove the jail's state; a failure says what was already done."""
+    try:
+        remove_jail(pending.jail)
+    except OSError as exc:
+        raise AgentSandboxError(
+            f"the changes were {done}, but the state in {pending.jail.root} could not be "
+            f"removed: {exc.strerror}: {exc.filename}"
+        ) from exc
 
 
 def discard(options: DiscardOptions, io: Io, *, host_env: Mapping[str, str], cwd: str) -> int:
@@ -239,11 +269,12 @@ def discard(options: DiscardOptions, io: Io, *, host_env: Mapping[str, str], cwd
     path = pending.meta.path
     with locked(pending.jail.lock, path, AgentSandboxError):
         _cleanup_stale_mount(pending, host_env)
-        changes = pending.changes()
+        with readable_tree(pending.jail.upper) as modes:
+            changes = pending.changes(modes)
         if changes and not options.yes:
             io.out(_summary(f"Changes to discard for {path}:", changes))
             if not io.ask(f"Discard these {len(changes)} changes? [y/N] "):
                 raise AgentSandboxError("discard cancelled; nothing was changed")
-        remove_jail(pending.jail)
+        _remove_state(pending, f"discarded for {path}")
     io.out(f"Discarded {len(changes)} changes for {path}.\n")
     return 0

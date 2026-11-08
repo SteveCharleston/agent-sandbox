@@ -1,14 +1,15 @@
 """Finding jails with pending changes in the state directory (FR-16, FR-45, FR-84)."""
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 
 from agent_sandbox.errors import AgentSandboxError
 from agent_sandbox.mounts import PathKind
-from agent_sandbox.state import JailDir, JailMeta, jail_dir, jail_id, read_meta
-from agent_sandbox.upper import Change, compute_changes
+from agent_sandbox.state import JailDir, JailMeta, jail_dir, jail_id, lock_if_free, read_meta
+from agent_sandbox.upper import Change, compute_changes, readable_tree
 
 
 def normalize_path(path: str, cwd: str) -> str:
@@ -35,9 +36,29 @@ class Pending:
         """For a jailed file: its name, the only entry that counts in the upper layer."""
         return None if self.meta.kind is PathKind.DIRECTORY else os.path.basename(self.meta.path)
 
-    def changes(self) -> list[Change]:
-        """The pending changes, compared with the lower directory as it is now."""
-        return compute_changes(self.lower, self.jail.upper, self.only)
+    def changes(self, modes: Mapping[str, int] | None = None) -> list[Change]:
+        """The pending changes, compared with the lower directory as it is now.
+
+        ``modes`` are original modes from ``readable_tree``.
+        """
+        try:
+            return compute_changes(self.lower, self.jail.upper, self.only, modes)
+        except OSError as exc:
+            raise AgentSandboxError(
+                f"cannot compare the pending changes of {self.meta.path}: {exc.strerror}: "
+                f"{exc.filename}"
+            ) from exc
+
+    @contextmanager
+    def reading(self) -> Iterator[Mapping[str, int]]:
+        """Read access for ``diff`` and ``listdiffs``, which do not need the lock.
+
+        If no session runs, the lock is taken and entries the program made unreadable
+        are opened temporarily; during a session, the upper layer is read as it is.
+        """
+        with ExitStack() as stack:
+            held = stack.enter_context(lock_if_free(self.jail.lock))
+            yield stack.enter_context(readable_tree(self.jail.upper)) if held else {}
 
     def last_change(self) -> datetime:
         """The latest modification time in the upper layer, in local time (FR-16)."""
@@ -71,6 +92,10 @@ def all_pending(state_dir: str, warn: Callable[[str], None]) -> list[Pending]:
         names = sorted(os.listdir(jails_dir))
     except FileNotFoundError:
         return []
+    except OSError as exc:
+        raise AgentSandboxError(
+            f"cannot read the state directory {jails_dir}: {exc.strerror}"
+        ) from exc
     result = []
     for name in names:
         jail = JailDir(os.path.join(jails_dir, name))

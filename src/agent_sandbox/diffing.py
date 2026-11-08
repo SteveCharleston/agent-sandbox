@@ -7,6 +7,7 @@ import stat
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
+from agent_sandbox.errors import AgentSandboxError
 from agent_sandbox.pending import Pending
 from agent_sandbox.upper import Change, ChangeKind, Entry, EntryType
 
@@ -243,15 +244,23 @@ def diff_text(pending: Pending | None, stat_only: bool) -> str:
     """The output of ``diff``: nothing without state or changes (FR-14)."""
     if pending is None:
         return ""
-    changes = pending.changes()
-    return format_stat(changes) if stat_only else format_diff(changes)
+    with pending.reading() as modes:
+        changes = pending.changes(modes)
+        try:
+            return format_stat(changes) if stat_only else format_diff(changes)
+        except OSError as exc:
+            raise AgentSandboxError(
+                f"cannot read {exc.filename}: {exc.strerror} (while a session runs, entries "
+                "the program made unreadable cannot be shown)"
+            ) from exc
 
 
 def listdiffs_text(pending: Iterable[Pending]) -> str:
     """The output of ``listdiffs``: ``PATH<TAB>COUNT<TAB>TIME`` per jail with changes (FR-16)."""
     lines = []
     for jail in pending:
-        count = len(jail.changes())
+        with jail.reading() as modes:
+            count = len(jail.changes(modes))
         if count:
             when = jail.last_change().isoformat(timespec="seconds")
             lines.append(f"{quote_path(jail.meta.path)}\t{count}\t{when}\n")

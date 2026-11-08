@@ -1,5 +1,6 @@
-"""Tests for merge and discard (FR-40 to FR-46, FR-99, open question 1)."""
+"""Tests for merge and discard (FR-40 to FR-47, FR-99)."""
 
+import dataclasses
 import io
 import os
 import stat
@@ -8,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from agent_sandbox import merging
-from agent_sandbox.cli import main
+from agent_sandbox.cli import main, parse_command
 from agent_sandbox.errors import AgentSandboxError, ExitCode
 from agent_sandbox.merging import Io, apply_changes, check_mergeable, conflicts
 from agent_sandbox.mounts import PathKind
@@ -222,10 +223,10 @@ def test_fr42_failure_midway_names_the_change_and_can_be_resumed(
     upper = build(tmp_path / "upper", {"a.txt": "a\n", "b.txt": "b\n", "c.txt": "c\n"})
     real_replace = merging._replace_file  # pylint: disable=protected-access
 
-    def fail_on_b(source: str, target: str) -> None:
+    def fail_on_b(source: str, target: str, mode: int) -> None:
         if target.endswith("b.txt"):
             raise PermissionError(13, "Permission denied")
-        real_replace(source, target)
+        real_replace(source, target, mode)
 
     monkeypatch.setattr(merging, "_replace_file", fail_on_b)
     report: list[str] = []
@@ -251,14 +252,14 @@ def test_fr42_special_files_are_rejected_before_anything_happens(tmp_path: Path)
         check_mergeable(compute_changes(str(lower), str(upper)))
 
 
-def test_open_question_1_conflict_warning(tmp_path: Path) -> None:
-    """Open question 1: warn if the host changed a file after the sandbox did."""
+def test_fr47_conflict_detection(tmp_path: Path) -> None:
+    """FR-47: a file the host changed after the sandbox did is a conflict."""
     lower = build(tmp_path / "lower", {"f": "host\n", "g": "host\n"})
     upper = build(tmp_path / "upper", {"f": "sandbox\n", "g": "sandbox\n"})
     os.utime(upper / "f", (1, 1))
     os.utime(lower / "g", (1, 1))
     assert conflicts(compute_changes(str(lower), str(upper))) == [
-        "f changed on the host after the sandbox changed it; merging replaces the host's version"
+        "f changed on the host after the sandbox changed it"
     ]
 
 
@@ -471,3 +472,55 @@ def test_fr40_cli_anything_but_yes_cancels(
     else:
         assert code == 1
         assert err.endswith("agent-sandbox: error: merge cancelled; nothing was changed\n")
+
+
+@pytest.fixture(name="conflicting")
+def fixture_conflicting(pending: Pending) -> Pending:
+    """The pending jail, with ``a.txt`` changed on the host after the sandbox changed it."""
+    os.utime(Path(pending.jail.upper) / "a.txt", (1, 1))
+    (Path(pending.meta.path) / "a.txt").write_text("host edit\n", encoding="utf-8")
+    return pending
+
+
+def test_fr47_conflicts_refuse_without_force(conflicting: Pending) -> None:
+    """FR-47: conflicts stop the merge before anything is asked or changed."""
+    fake = FakeIo(True)
+    with pytest.raises(AgentSandboxError) as info:
+        run_merge(conflicting, fake)
+    assert str(info.value) == (
+        "1 conflicts: the host changed these files after the sandbox did; nothing was "
+        "changed. Use --force to replace the host's versions"
+    )
+    assert fake.warnings == ["conflict: a.txt changed on the host after the sandbox changed it"]
+    assert not fake.questions
+    proj = Path(conflicting.meta.path)
+    assert (proj / "a.txt").read_text(encoding="utf-8") == "host edit\n"
+    assert (proj / "old.txt").exists()
+
+
+def test_fr47_force_replaces_the_host_version(conflicting: Pending) -> None:
+    """FR-47: ``--force`` merges and still names the conflicts."""
+    fake = FakeIo()
+    options = dataclasses.replace(merge_options(conflicting, yes=True), force=True)
+    assert merging.merge(options, fake.io, host_env={}, cwd="/") == 0
+    assert fake.warnings == ["conflict: a.txt changed on the host after the sandbox changed it"]
+    assert (Path(conflicting.meta.path) / "a.txt").read_text(encoding="utf-8") == "changed\n"
+
+
+def test_fr47_dry_run_reports_conflicts(conflicting: Pending) -> None:
+    """FR-47: the dry run lists conflicts and says that --force would be needed."""
+    fake = FakeIo()
+    assert run_merge(conflicting, fake, dry_run=True) == 0
+    assert fake.warnings == [
+        "conflict: a.txt changed on the host after the sandbox changed it",
+        "merge would refuse because of 1 conflicts; --force overrides this",
+    ]
+
+
+def test_fr47_cli_force_option(capsys: pytest.CaptureFixture[str]) -> None:
+    """FR-47: ``merge --force`` is parsed."""
+    assert parse_command(["merge", "--force", "/p"]) == MergeOptions(
+        path="/p", yes=False, dry_run=False, state_dir=None, debug=False, force=True
+    )
+    assert main(["merge", "--help"]) == 0
+    assert "--force" in capsys.readouterr().out

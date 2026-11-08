@@ -2,6 +2,7 @@
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -200,3 +201,24 @@ def test_nfr3_module_entry_point_runs() -> None:
     )
     assert result.returncode == 0
     assert result.stdout.strip() == f"agent-sandbox {__version__}"
+
+
+def test_fr100_warning_when_run_as_root(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FR-100: as root, a warning is printed, but the command still runs."""
+    monkeypatch.setattr("os.geteuid", lambda: 0)
+    assert main(["listdiffs", "--state-dir", str(tmp_path)]) == 0
+    assert capsys.readouterr().err == (
+        "agent-sandbox: warning: running as root is not supported; "
+        "agent-sandbox is meant for normal users\n"
+    )
+
+
+def test_fr100_no_warning_as_normal_user(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """FR-100: no warning for normal users."""
+    monkeypatch.setattr("os.geteuid", lambda: 1000)
+    assert main(["listdiffs", "--state-dir", str(tmp_path)]) == 0
+    assert capsys.readouterr().err == ""

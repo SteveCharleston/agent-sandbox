@@ -1,6 +1,7 @@
 """Tests for finding pending changes and the diff/listdiffs commands (FR-14 to FR-18, FR-84)."""
 
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -170,3 +171,45 @@ def test_fr5_diff_output_keeps_bytes(
     make_pending(tmp_path / "state", proj, {"f": b"caf\xe8\n"})
     assert main(["diff", "--state-dir", str(tmp_path / "state"), str(proj)]) == 0
     assert b"+caf\xe8\n" in capsysbinary.readouterr().out
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read everything")
+def test_fr94_unreadable_state_directory(
+    setup: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """FR-94: unreadable state is a clear error, not a traceback or "corrupt state"."""
+    state, proj = setup
+    jails = state / "jails"
+    jails.chmod(0o000)
+    try:
+        assert main(["listdiffs"]) == 1
+        assert capsys.readouterr().err == (
+            f"agent-sandbox: error: cannot read the state directory {jails}: Permission denied\n"
+        )
+        assert main(["diff", str(proj)]) == 1
+        meta = jail_dir(str(state), str(proj)).meta
+        assert capsys.readouterr().err == (
+            f"agent-sandbox: error: cannot read {meta}: Permission denied\n"
+        )
+    finally:
+        jails.chmod(0o700)
+
+
+def test_fr94_unreadable_upper_entries_are_opened_temporarily(
+    setup: tuple[Path, Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """FR-94: entries the program made unreadable are read, with their recorded modes."""
+    state, proj = setup
+    upper = Path(jail_dir(str(state), str(proj)).upper)
+    build(upper, {"locked": {"s": "s\n"}})
+    (upper / "locked").chmod(0o000)
+    (upper / "new.txt").chmod(0o000)
+    try:
+        assert main(["diff", "--stat", str(proj)]) == 0
+        out = capsys.readouterr().out
+        assert "A\t-\t-\tlocked/\nA\t1\t0\tlocked/s\n" in out
+        assert "A\t1\t0\tnew.txt\n" in out
+        assert stat.S_IMODE((upper / "locked").lstat().st_mode) == 0
+        assert stat.S_IMODE((upper / "new.txt").lstat().st_mode) == 0
+    finally:
+        (upper / "locked").chmod(0o700)

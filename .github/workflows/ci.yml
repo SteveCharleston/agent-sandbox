@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }} on Ubuntu (FHS)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Host prerequisites (FR-101): installed by the administrator, outside the tool.
+      - name: Install bubblewrap, fuse-overlayfs and test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap fuse-overlayfs fuse3 git patch
+      - name: Allow unprivileged user namespaces (Ubuntu 24.04 restricts them via AppArmor)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install the project
+        run: uv sync --locked
+
+      # The quality gate (section 10.2, AC-17); the tests run as the unprivileged runner user.
+      - run: uv run black --check .
+      - run: uv run isort --check .
+      - run: uv run flake8
+      - run: uv run pylint src tests
+      - run: uv run mypy src tests
+      - name: Tests (unit and integration)
+        run: uv run pytest -v -rs

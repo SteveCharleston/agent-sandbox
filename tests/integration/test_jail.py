@@ -9,39 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from agent_sandbox.overlay import is_mounted, unmount_overlay
+from agent_sandbox.overlay import is_mounted
 from agent_sandbox.state import jail_dir
 from tests.integration.conftest import Cli
 
-pytestmark = pytest.mark.integration
-
-
-@pytest.fixture(name="overlay_available", scope="session")
-def fixture_overlay_available(tmp_path_factory: pytest.TempPathFactory) -> None:
-    """Skip if fuse-overlayfs cannot be mounted here as an unprivileged user."""
-    tools = [shutil.which(name) for name in ("fuse-overlayfs", "fusermount3")]
-    if None in tools:
-        pytest.skip("fuse-overlayfs or fusermount3 is not installed")
-    root = tmp_path_factory.mktemp("overlay-check")
-    for name in ("lower", "upper", "work", "merged"):
-        (root / name).mkdir()
-    result = subprocess.run(
-        [str(tools[0]), "-o", "lowerdir=lower,upperdir=upper,workdir=work", "merged"],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        pytest.skip(f"fuse-overlayfs cannot mount: {result.stderr.strip()}")
-    # Right after mounting, fusermount3 -u is sometimes busy; unmount_overlay retries.
-    unmount_overlay(str(root / "merged"), str(tools[1]))
-
-
-@pytest.fixture(autouse=True)
-def require_overlay(overlay_available: None) -> None:
-    """Apply the overlay check to every test in this module."""
-    del overlay_available
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("overlay_available")]
 
 
 @pytest.fixture(name="proj")
@@ -431,3 +403,50 @@ def test_fr42_interrupted_cancel_keeps_everything(cli: Cli, proj: Path) -> None:
     assert result.stderr.endswith("agent-sandbox: error: merge cancelled; nothing was changed\n")
     assert (proj / "old.txt").exists()
     assert cli("listdiffs").stdout.startswith(f"{proj}\t1\t")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read everything")
+def test_fr94_entries_the_program_made_unreadable(cli: Cli, proj: Path) -> None:
+    """FR-94: ``chmod 000`` in the jail does not break diff or merge; modes are kept."""
+    script = "mkdir locked; echo s > locked/s; chmod 000 locked; echo t > t.txt; chmod 000 t.txt"
+    assert cli("run", "-j", ".", "--", "sh", "-c", script, cwd=proj).returncode == 0
+    stat_output = cli("diff", "--stat", ".", cwd=proj)
+    assert stat_output.returncode == 0, stat_output.stderr
+    assert stat_output.stdout.splitlines()[:3] == [
+        "A\t-\t-\tlocked/",
+        "A\t1\t0\tlocked/s",
+        "A\t1\t0\tt.txt",
+    ]
+    diff = cli("diff", ".", cwd=proj).stdout
+    assert "new file mode 100000\n" in diff
+    upper = upper_of(cli, proj)
+    assert stat.S_IMODE((upper / "locked").lstat().st_mode) == 0
+    result = cli("merge", "-y", ".", cwd=proj)
+    assert result.returncode == 0, result.stderr
+    try:
+        assert stat.S_IMODE((proj / "t.txt").lstat().st_mode) == 0
+        assert stat.S_IMODE((proj / "locked").lstat().st_mode) == 0
+        (proj / "locked").chmod(0o700)
+        assert (proj / "locked" / "s").read_text(encoding="utf-8") == "s\n"
+    finally:
+        (proj / "locked").chmod(0o700)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write everywhere")
+def test_fr94_state_dir_not_writable(cli: Cli, proj: Path, tmp_path: Path) -> None:
+    """FR-94: an unwritable state directory is a clear setup error (exit 125)."""
+    locked_dir = tmp_path / "readonly"
+    locked_dir.mkdir()
+    locked_dir.chmod(0o555)
+    try:
+        result = cli(
+            "run", "--state-dir", str(locked_dir / "state"), "-j", str(proj), "--", "true"
+        )
+    finally:
+        locked_dir.chmod(0o755)
+    assert result.returncode == 125
+    assert result.stderr.splitlines()[-1] == (
+        f"agent-sandbox: error: cannot create the state directory {locked_dir / 'state'}: "
+        "Permission denied; choose another location with --state-dir or "
+        "$AGENT_SANDBOX_STATE_DIR"
+    )

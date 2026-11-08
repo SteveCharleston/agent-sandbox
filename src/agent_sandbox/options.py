@@ -96,6 +96,7 @@ class MergeOptions:
     dry_run: bool
     state_dir: str | None
     debug: bool
+    force: bool = False
 
 
 @dataclass(frozen=True)

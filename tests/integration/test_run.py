@@ -264,3 +264,33 @@ def test_nfr6_special_characters_in_paths(cli: Cli, tmp_path: Path) -> None:
     result = cli("run", "-w", str(directory), "--", "touch", str(directory / "new file"))
     assert result.returncode == 0, result.stderr
     assert (directory / "new file").exists()
+
+
+TTY_PROBE = """
+import errno, fcntl, os, termios
+master, slave = os.openpty()
+for name, request, argument in (
+    ("TIOCSTI", termios.TIOCSTI, b"x"),
+    ("TIOCLINUX", 0x541C, b"\\x06"),
+    ("TIOCGWINSZ", termios.TIOCGWINSZ, bytes(8)),
+):
+    try:
+        fcntl.ioctl(slave, request, argument)
+        print(name, "allowed")
+    except OSError as exc:
+        print(name, errno.errorcode[exc.errno])
+"""
+
+
+@pytest.mark.skipif(shutil.which("python3") is None, reason="needs python3 on the host")
+def test_fr24b_terminal_injection_is_blocked(cli: Cli) -> None:
+    """FR-24b: TIOCSTI and TIOCLINUX fail with EPERM inside the sandbox; others work."""
+    result = cli("run", "--", "python3", "-c", TTY_PROBE)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "TIOCSTI EPERM\nTIOCLINUX EPERM\nTIOCGWINSZ allowed\n"
+
+
+def test_fr21_no_network_also_hides_abstract_sockets(cli: Cli) -> None:
+    """FR-21: --no-network isolates the host's abstract Unix sockets too."""
+    script = "grep -c '@' /proc/net/unix || true"
+    assert cli("run", "--no-network", "--", "sh", "-c", script).stdout == "0\n"

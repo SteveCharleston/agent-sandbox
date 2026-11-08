@@ -192,3 +192,27 @@ Verified inside the sandbox with the real host `$PATH`:
   `dir/new` and `chmod 600 dir/existing` all fail with `Permission denied`. Recorded as
   FR-70a. Read-only directories created *inside* the jail work (they live in the upper
   layer), and `merge` handles them by setting directory modes last.
+
+## Step 9 findings (2026-11-08)
+
+- **Docker** is installed but its socket needs root (or the `docker` group), so the
+  planned local FHS run could not be done without `sudo`. FHS is covered by the CI
+  workflow (Ubuntu 24.04) instead.
+- **Python 3.11** (via `nix-shell -p python311`, separate virtual environment): all
+  tests pass, integration tests included, after removing backslashes from f-string
+  expressions in one test (allowed only since Python 3.12).
+- **Abstract Unix sockets:** with the network shared, the sandbox sees all of the
+  host's abstract sockets (20 here, including D-Bus and systemd); with `--no-network`
+  none. Documented in FR-21 and the README.
+- **`strace -f` breaks `-j`:** tracing disables the setuid bit of `fusermount3`, so
+  `fuse-overlayfs` cannot mount under `strace`. AC-16b uses Python audit hooks instead.
+- **Agent-made `chmod 000`** reaches the upper layer and made `diff` crash. Readers now
+  open such entries temporarily (with the jail's lock held) and report the original
+  modes.
+- **Start-up overhead (NFR-30)**, medians of 10 runs: `run -- true` 175 ms (overhead
+  173 ms, target 300 ms); `run -j` on 10 000 files 205 ms (target 1 s). About 140 ms is
+  Python importing the CLI, 65 ms of that `importlib.metadata` for `__version__`; an
+  easy win if it ever matters, but not needed for the target.
+- **TIOCSTI filter:** inside the sandbox `TIOCSTI` and `TIOCLINUX` fail with `EPERM`,
+  other ioctls work; outside, the kernel answers `EIO` (`legacy_tiocsti = 0`) and
+  `ENOTTY`.

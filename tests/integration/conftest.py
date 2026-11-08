@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from agent_sandbox.overlay import unmount_overlay
+
 
 @pytest.fixture(name="sandbox_available", scope="session")
 def fixture_sandbox_available() -> None:
@@ -30,6 +32,28 @@ def fixture_sandbox_available() -> None:
 def require_sandbox(sandbox_available: None) -> None:
     """Apply the availability check to every integration test."""
     del sandbox_available
+
+
+@pytest.fixture(name="overlay_available", scope="session")
+def fixture_overlay_available(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """Skip if fuse-overlayfs cannot be mounted here as an unprivileged user."""
+    tools = [shutil.which(name) for name in ("fuse-overlayfs", "fusermount3")]
+    if None in tools:
+        pytest.skip("fuse-overlayfs or fusermount3 is not installed")
+    root = tmp_path_factory.mktemp("overlay-check")
+    for name in ("lower", "upper", "work", "merged"):
+        (root / name).mkdir()
+    result = subprocess.run(
+        [str(tools[0]), "-o", "lowerdir=lower,upperdir=upper,workdir=work", "merged"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"fuse-overlayfs cannot mount: {result.stderr.strip()}")
+    # Right after mounting, fusermount3 -u is sometimes busy; unmount_overlay retries.
+    unmount_overlay(str(root / "merged"), str(tools[1]))
 
 
 class Cli:
@@ -56,6 +80,12 @@ class Cli:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+        )
+
+    def run_raw(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        """Run any command with the CLI's environment and capture its output."""
+        return subprocess.run(
+            command, env=self.env, capture_output=True, text=True, timeout=120, check=False
         )
 
     def __call__(

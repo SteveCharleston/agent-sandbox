@@ -178,9 +178,9 @@ class FakeSession:
         self.events.append("unmount")
         shutil.rmtree(merged, ignore_errors=True)
 
-    def supervise(self, command: list[str], env: object) -> int:
+    def supervise(self, command: list[str], env: object, seccomp: bytes | None = None) -> int:
         """Fake supervise."""
-        del env
+        del env, seccomp
         self.command = command
         self.events.append("bwrap")
         if self.raise_in_supervise is not None:

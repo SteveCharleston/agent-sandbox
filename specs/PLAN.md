@@ -41,6 +41,7 @@ src/agent_sandbox/
     bwrap.py         # sandbox plan and pure bwrap argument builder
     programs.py      # program lookup and PATH visibility (FR-9, FR-29)
     supervisor.py    # spawning bwrap, signal forwarding, exit status (FR-23, FR-24)
+    seccomp.py       # BPF filter against TIOCSTI/TIOCLINUX (FR-24b)
     deps.py          # dependency and user-namespace checks (9.2)
     state.py         # state dir, jail ids, meta.json, locking (8)
     overlay.py       # fuse-overlayfs mount/unmount (7)
@@ -320,6 +321,11 @@ AC-1 to AC-17
 
 **Done when:** all of AC-1 to AC-17 pass on at least one FHS machine. NixOS behavior is
 verified on a real NixOS system or documented as covered by unit tests only.
+
+**Status (2026-11-08):** all tests, including every AC, pass on NixOS with Python 3.13
+and 3.11. FHS verification runs in CI (`.github/workflows/ci.yml`, Ubuntu 24.04,
+Python 3.11 to 3.13); the local Docker run was not possible without root (see
+`NOTES.md`). The `v0.1.0` tag is left to the maintainer.
 
 ---
 

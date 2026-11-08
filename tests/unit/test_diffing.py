@@ -34,6 +34,11 @@ def diff_of(tmp_path: Path, lower: Tree, upper: Tree) -> str:
 
 EMPTY_HASH = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
 NULL = "0" * 40
+# Computed outside f-strings: Python 3.11 allows no backslashes in f-string expressions.
+OLD_F_HASH = git_hash(b"one\ntwo\nthree\n")
+NEW_F_HASH = git_hash(b"one\n2\nthree\nfour")
+NEW_HASH = git_hash(b"new\n")
+OLD_HASH = git_hash(b"old\n")
 
 
 def test_git_hash() -> None:
@@ -83,7 +88,7 @@ def test_fr12_modified_text_file(tmp_path: Path) -> None:
     )
     assert text == (
         "diff --git a/f.txt b/f.txt\n"
-        f"index {git_hash(b'one\ntwo\nthree\n')}..{git_hash(b'one\n2\nthree\nfour')} 100644\n"
+        f"index {OLD_F_HASH}..{NEW_F_HASH} 100644\n"
         "--- a/f.txt\n"
         "+++ b/f.txt\n"
         "@@ -1,3 +1,4 @@\n"
@@ -107,14 +112,14 @@ def test_fr12_added_deleted_and_empty_files(tmp_path: Path) -> None:
         f"index {NULL}..{EMPTY_HASH}\n"
         "diff --git a/new.txt b/new.txt\n"
         "new file mode 100644\n"
-        f"index {NULL}..{git_hash(b'new\n')}\n"
+        f"index {NULL}..{NEW_HASH}\n"
         "--- /dev/null\n"
         "+++ b/new.txt\n"
         "@@ -0,0 +1 @@\n"
         "+new\n"
         "diff --git a/old.txt b/old.txt\n"
         "deleted file mode 100644\n"
-        f"index {git_hash(b'old\n')}..{NULL}\n"
+        f"index {OLD_HASH}..{NULL}\n"
         "--- a/old.txt\n"
         "+++ /dev/null\n"
         "@@ -1 +0,0 @@\n"

@@ -4,7 +4,9 @@ import filecmp
 import os
 import posixpath
 import stat
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 # fuse-overlayfs's representation (specs/NOTES.md, section 2).
@@ -89,8 +91,11 @@ def is_opaque(upper_dir: str) -> bool:
     return os.path.lexists(os.path.join(upper_dir, OPAQUE_MARKER))
 
 
-def _upper_children(upper_dir: str) -> tuple[dict[str, Entry], set[str]]:
-    """The entries of an upper directory and the names it marks as deleted."""
+def _upper_children(upper_dir: str, modes: Mapping[str, int]) -> tuple[dict[str, Entry], set[str]]:
+    """The entries of an upper directory and the names it marks as deleted.
+
+    ``modes`` holds original modes of entries that ``readable_tree`` opened.
+    """
     entries: dict[str, Entry] = {}
     whiteouts: set[str] = set()
     for name in os.listdir(upper_dir):
@@ -103,9 +108,44 @@ def _upper_children(upper_dir: str) -> tuple[dict[str, Entry], set[str]]:
         info = os.lstat(path)
         if is_whiteout(info):
             whiteouts.add(name)
-        else:
-            entries[name] = Entry.from_stat(path, info)
+            continue
+        entry = Entry.from_stat(path, info)
+        entries[name] = replace(entry, mode=modes[path]) if path in modes else entry
     return entries, whiteouts
+
+
+def _open_for_reading(path: str, changed: dict[str, int]) -> None:
+    """Add owner read (and search) permission below ``path``, recording old modes."""
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode):
+        return
+    is_directory = stat.S_ISDIR(info.st_mode)
+    needed = stat.S_IRUSR | stat.S_IXUSR if is_directory else stat.S_IRUSR
+    mode = stat.S_IMODE(info.st_mode)
+    if mode & needed != needed and (is_directory or stat.S_ISREG(info.st_mode)):
+        os.chmod(path, mode | needed)
+        changed[path] = mode
+    if is_directory:
+        for name in os.listdir(path):
+            _open_for_reading(os.path.join(path, name), changed)
+
+
+@contextmanager
+def readable_tree(upper: str) -> Iterator[Mapping[str, int]]:
+    """Temporarily make everything in an upper layer readable for its owner.
+
+    The program may have removed permissions in the sandbox (``chmod 000``). Yields the
+    original modes of the entries it changed, which ``compute_changes`` reports instead;
+    they are restored afterwards. Only use it while holding the jail's lock.
+    """
+    changed: dict[str, int] = {}
+    try:
+        if os.path.isdir(upper):
+            _open_for_reading(upper, changed)
+        yield changed
+    finally:
+        for path, mode in reversed(changed.items()):
+            os.chmod(path, mode)
 
 
 def same_content(old: Entry, new: Entry) -> bool:
@@ -122,14 +162,15 @@ def same_content(old: Entry, new: Entry) -> bool:
 class _Collector:
     """Walks upper and lower directories together and collects the changes."""
 
-    def __init__(self) -> None:
+    def __init__(self, modes: Mapping[str, int]) -> None:
         self.changes: list[Change] = []
+        self.modes = modes
 
     def directory(
         self, rel: str, lower_dir: str | None, upper_dir: str, opaque: bool, only: str | None
     ) -> None:
         """Compare an upper directory with its lower counterpart (if any)."""
-        entries, whiteouts = _upper_children(upper_dir)
+        entries, whiteouts = _upper_children(upper_dir, self.modes)
         lower_names = set(os.listdir(lower_dir)) if lower_dir else set()
         names = set(entries) | whiteouts | (lower_names if opaque else set())
         if only is not None:
@@ -176,7 +217,12 @@ class _Collector:
         self.changes.append(Change(rel, ChangeKind.DELETED, old, None))
 
 
-def compute_changes(lower: str | None, upper: str, only: str | None = None) -> list[Change]:
+def compute_changes(
+    lower: str | None,
+    upper: str,
+    only: str | None = None,
+    modes: Mapping[str, int] | None = None,
+) -> list[Change]:
     """Return the changes the upper layer makes to the lower directory (FR-72).
 
     Only the upper layer is walked, plus the lower parts it hides or replaces, so a
@@ -184,10 +230,11 @@ def compute_changes(lower: str | None, upper: str, only: str | None = None) -> l
     ``touch`` or a ``chmod`` back and forth) are not changes. ``lower`` may be ``None``
     or missing (FR-45): then everything in the upper layer is added. ``only``
     restricts the result to one top-level name, for single-file jails (FR-37).
+    ``modes`` are original modes from ``readable_tree``.
     """
     if not os.path.isdir(upper):
         return []
-    collector = _Collector()
+    collector = _Collector(modes or {})
     lower_dir = lower if lower is not None and os.path.isdir(lower) else None
     collector.directory("", lower_dir, upper, False, only)
     return collector.changes

@@ -240,7 +240,7 @@ agent-sandbox listdiffs [--state-dir DIR] [--debug]
 ### 5.5 `merge` and `discard`
 
 ```
-agent-sandbox merge [-y] [--dry-run] [--state-dir DIR] [--debug] PATH
+agent-sandbox merge [-y] [--dry-run] [--force] [--state-dir DIR] [--debug] PATH
 agent-sandbox discard [-y] [--state-dir DIR] [--debug] PATH
 ```
 
@@ -248,6 +248,7 @@ agent-sandbox discard [-y] [--state-dir DIR] [--debug] PATH
 |--------|---------|
 | `-y`, `--yes` | Do not ask for confirmation (FR-40, FR-44). |
 | `--dry-run` | `merge` only: show what would change, modify nothing (FR-41). |
+| `--force` | `merge` only: merge even if the host changed files after the sandbox did (FR-47). |
 
 - FR-40: `merge` copies all pending changes for `PATH` to the real path: new and modified
   files are copied (preserving mode, mtime, and symlinks), deletions are applied,
@@ -287,6 +288,13 @@ agent-sandbox discard [-y] [--state-dir DIR] [--debug] PATH
   removed completely and `Discarded N changes for PATH.` is printed.
 - FR-45: `diff`, `merge`, and `discard` **MUST** work for any path with state, even if
   `PATH` no longer exists on the host. `merge` recreates it.
+- FR-47: **Conflicts.** A conflict is a modified file or symlink whose version on the
+  host is newer (modification time) than the pending version, i.e. the host changed it
+  after the sandbox did. Without `--force`, `merge` lists the conflicts on stderr and
+  refuses with exit 1 before asking or changing anything. With `--force`, the conflicts
+  are listed as warnings and the pending versions replace the host's. `merge --dry-run`
+  lists conflicts as warnings and says that `--force` would be needed. (Decision on
+  former open question 1.)
 - FR-46: For `PATH` with no state, these commands fail with exit code 1 and the message
   `no pending changes for PATH`. The exception is `diff`, which follows FR-14. State
   without changes (for example after a session that only read files) is removed by
@@ -312,6 +320,9 @@ agent-sandbox discard [-y] [--state-dir DIR] [--debug] PATH
   mount, PID, IPC, UTS, and cgroup namespace; `--die-with-parent`; `--proc /proc`;
   `--dev /dev`; and an empty tmpfs `/tmp`.
 - FR-21: Network namespace is shared by default and unshared with `--no-network`.
+  Sharing the network namespace also shares the host's abstract Unix sockets (for
+  example D-Bus, X11, systemd; verified in Step 9), so a program can reach these
+  services. The README's security section says so; `--no-network` isolates them too.
 - FR-22: Nothing from the host filesystem is visible except system mounts (6.2) and
   explicit mount specs (6.3). In particular `$HOME` is an empty tmpfs unless a
   mount spec includes it or parts of it. `$HOME` as an environment variable is
@@ -343,9 +354,12 @@ agent-sandbox discard [-y] [--state-dir DIR] [--debug] PATH
   `run` fails with exit 125 (`bwrap` prints the details itself).
 - FR-24b: **Terminal input injection:** the `TIOCSTI` ioctl lets a program with access
   to the terminal inject input into the user's shell. Linux 6.2 and later can block it
-  (`dev.tty.legacy_tiocsti = 0`, the case on the test machine). On hosts where it is
-  allowed, `run` **SHOULD** block `TIOCSTI` and `TIOCLINUX` with a seccomp filter
-  (`bwrap --seccomp`), as Flatpak does (planned for Step 9).
+  (`dev.tty.legacy_tiocsti = 0`, the case on the test machine). `run` **MUST** always
+  block `TIOCSTI` and `TIOCLINUX` with a seccomp filter (`bwrap --seccomp`), as Flatpak
+  does, so the protection does not depend on the kernel setting. The `ioctl` fails with
+  `EPERM`; all other system calls are unaffected. The filter covers the native and the
+  32-bit compatibility system calls on x86_64 (including x32) and aarch64. On other
+  architectures no filter is installed and `--debug` says so.
 
 ### 6.2 System mounts and host layout detection
 
@@ -774,27 +788,30 @@ shows no leftover mounts for it, and the upper layers still hold their changes.
 
 **AC-16b: Unprivileged operation (FR-95 to FR-102)**
 As a regular user in a fresh session (no `sudo` credentials cached, no `CAP_SYS_ADMIN`),
-every example above (AC-1 to AC-16) works. `strace -f -e trace=execve` of a full
-`run -j` / `diff` / `merge` cycle shows no execution of `sudo`, `su`, `doas`, or `pkexec`.
-No file outside the state directory and the explicit mount spec paths is created or
-modified.
+every example above (AC-1 to AC-16) works. An audit of every program `agent-sandbox`
+starts during a full `run -j` / `listdiffs` / `diff` / `merge` cycle (Python audit hooks
+on `subprocess`, `posix_spawn` and `exec`) shows `bwrap`, `fuse-overlayfs` and
+`fusermount3`, and no `sudo`, `su`, `doas`, `pkexec` or `run0`. (`strace -f` cannot be
+used for this: tracing disables the setuid bit of `fusermount3`, so mounting fails.)
+With the default state directory, nothing besides the state directory and the explicit
+mount spec paths is created or modified in `$HOME`.
 
 **AC-17: Code quality (10.2, 10.3)**
 `uv run black --check . && uv run isort --check . && uv run flake8 && uv run pylint src tests && uv run mypy src tests && uv run pytest`
 all succeed.
 
-## 12. Open Questions
+## 12. Decisions on Former Open Questions
 
-These are not decided yet. Defaults below apply until they are.
+Decided for v0.1 (2026-11-08); they can be revisited later.
 
-1. **Merge conflict detection:** if the real path changed on the host after the program
-   modified it in the overlay, should `merge` detect and refuse (needs a recorded base
-   snapshot or hash) or just overwrite? *Default: overwrite, `merge` prints a warning
-   when the real file's mtime is newer than the upper file. (Implemented in Step 8, for
-   modified files and symlinks.)*
-2. **`/etc` exposure:** sharing all of `/etc` read-only is simple but exposes host
-   configuration. Should there be a curated allowlist? *Default: whole `/etc`.*
-3. **Garbage collection:** should there be a command to list or remove stale state of
-   paths that no longer exist? *Default: `listdiffs` + `discard` are enough.*
-4. **Other layouts:** Guix, Gentoo Prefix, or similar are out of scope for v0.1 but
-   FR-28 keeps the door open.
+1. **Merge conflict detection:** `merge` refuses when the host changed a file after the
+   sandbox did, unless `--force` is given (FR-47). Detection uses modification times;
+   recording base hashes for exact detection is a possible later improvement.
+2. **`/etc` exposure:** all of `/etc` stays shared read-only, so tools find their
+   configuration. The README's security section says that the program can read host
+   configuration there.
+3. **Garbage collection:** no extra command. `listdiffs` shows state of paths that no
+   longer exist, and `discard PATH` removes it (FR-45).
+4. **Other layouts:** Guix, Gentoo Prefix and similar are out of scope for v0.1; the
+   layout table (FR-28) makes adding them a local change.
+5. **Terminal input injection:** the seccomp filter of FR-24b is always applied.

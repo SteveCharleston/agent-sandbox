@@ -17,6 +17,7 @@ from agent_sandbox.mounts import MountSpec, plan_mounts
 from agent_sandbox.options import MountMode, RunOptions
 from agent_sandbox.overlay import describe_mount, open_jail
 from agent_sandbox.programs import find_program, invisible_path_entries
+from agent_sandbox.seccomp import tty_injection_filter
 from agent_sandbox.state import bind_source, jail_dir, state_dir_location
 from agent_sandbox.supervisor import supervise
 
@@ -139,5 +140,10 @@ def run(
             for spec in prepared.jails:
                 stack.enter_context(open_jail(spec, prepared.state_dir, tools, debug))
         check_program(plan, debug, mounted=True)
+        seccomp = tty_injection_filter()
+        if seccomp is None:
+            debug("no seccomp filter against TIOCSTI/TIOCLINUX for this architecture")
+        else:
+            debug("seccomp filter: TIOCSTI and TIOCLINUX fail with EPERM (--seccomp FD)")
         debug(f"bwrap command:\n{format_command(plan, bwrap)}")
-        return supervise(build_command(plan, bwrap), host_env)
+        return supervise(build_command(plan, bwrap), host_env, seccomp)

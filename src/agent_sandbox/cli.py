@@ -175,6 +175,9 @@ Shows a summary and asks for confirmation first, unless --yes is given; the
 question goes to stderr and the answer is read from stdin. If merging fails
 halfway, the pending changes are kept and merge can safely be run again.
 Refuses to run while a session uses PATH (--dry-run works anyway).
+
+Conflicts: if a file changed on the host after the sandbox changed it, merge
+lists these files and refuses, unless --force is given.
 """
 
 MERGE_EPILOG = """\
@@ -182,11 +185,12 @@ examples:
   agent-sandbox merge ~/git/myproject
   agent-sandbox merge --dry-run ~/git/myproject
   agent-sandbox merge -y ~/git/myproject
+  agent-sandbox merge --force ~/git/myproject
 
 exit codes:
   0       success
-  1       error, no pending changes for PATH, PATH is in use by a session, or
-          the question was not answered with y
+  1       error, no pending changes for PATH, PATH is in use by a session,
+          conflicts without --force, or the question was not answered with y
   2       usage error
 """
 
@@ -430,6 +434,14 @@ def _build_parsers() -> _Parsers:
     merge.add_argument(
         "--dry-run", action="store_true", help="Show what would change and modify nothing."
     )
+    merge.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Merge even if files changed on the host after the sandbox changed them; "
+            "the pending versions replace the host's."
+        ),
+    )
 
     discard = add_subcommand(
         "discard", "Delete pending changes of a jailed path.", DISCARD_DESCRIPTION, DISCARD_EPILOG
@@ -548,6 +560,7 @@ def parse_command(argv: Sequence[str]) -> Command:
                 dry_run=args.dry_run,
                 state_dir=args.state_dir,
                 debug=args.debug,
+                force=args.force,
             )
         case "discard":
             return DiscardOptions(
@@ -646,6 +659,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         command = parse_command(sys.argv[1:] if argv is None else argv)
     except SystemExit as exc:
         return _exit_code(exc)
+    if os.geteuid() == 0:
+        warn("running as root is not supported; agent-sandbox is meant for normal users")
     try:
         return _dispatch(command)
     except AgentSandboxError as exc:
