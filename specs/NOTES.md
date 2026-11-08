@@ -171,3 +171,16 @@ Verified inside the sandbox with the real host `$PATH`:
   directory. `fuse-overlayfs` handles this. The state directory must be hidden in the
   sandbox even when it is only created by this run (bug found and fixed: the hiding
   decision used to depend on whether the directory existed before the run).
+
+## Step 7 findings (2026-11-08)
+
+- `fusermount3 -u` **right after** mounting fails with `Device or resource busy` in about
+  1 of 75 attempts (2 of 150 in a loop). `unmount_overlay` retries and falls back to a
+  lazy unmount, so `run` is not affected; a test fixture without retries was flaky and
+  left mounts behind until it used `unmount_overlay` too.
+- `git apply` and GNU `patch -p1` both apply the diff output (FR-13), including CRLF
+  files, missing final newlines, spaces, tabs and non-ASCII names, symlinks and mode
+  changes. GNU `patch` needs names with spaces quoted (unlike git's own output), and
+  `git apply` keeps only the executable bit of modes. A `Binary files ... differ`
+  block without binary data makes `git apply` abort the whole patch (and hit an
+  assertion in git), so binary changes are comment lines instead.

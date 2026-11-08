@@ -46,6 +46,7 @@ src/agent_sandbox/
     overlay.py       # fuse-overlayfs mount/unmount (7)
     session.py       # `run` orchestration and lifecycle (6.5)
     upper.py         # reading upper layers: whiteouts, opaque dirs (FR-72)
+    pending.py       # finding jails with pending changes in the state directory
     diffing.py       # diff, listdiffs, stat (5.3, 5.4)
     merging.py       # merge and discard (5.5)
 tests/

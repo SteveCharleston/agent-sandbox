@@ -193,8 +193,6 @@ def test_fr93_debug_before_subcommand(argv: list[str]) -> None:
 @pytest.mark.parametrize(
     ("argv", "name"),
     [
-        (["diff", "/p"], "diff"),
-        (["listdiffs"], "listdiffs"),
         (["merge", "/p"], "merge"),
         (["discard", "/p"], "discard"),
     ],

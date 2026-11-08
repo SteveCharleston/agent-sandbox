@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_sandbox.overlay import is_mounted
+from agent_sandbox.overlay import OverlayTools, is_mounted, unmount_overlay
 from agent_sandbox.state import jail_dir
 from tests.integration.conftest import Cli
 
@@ -34,7 +34,8 @@ def fixture_overlay_available(tmp_path_factory: pytest.TempPathFactory) -> None:
     )
     if result.returncode != 0:
         pytest.skip(f"fuse-overlayfs cannot mount: {result.stderr.strip()}")
-    subprocess.run([str(tools[1]), "-u", str(root / "merged")], check=True)
+    # Right after mounting, fusermount3 -u is sometimes busy; unmount_overlay retries.
+    unmount_overlay(str(root / "merged"), OverlayTools(str(tools[0]), str(tools[1])))
 
 
 @pytest.fixture(autouse=True)
@@ -253,3 +254,80 @@ def test_nfr6_jail_path_with_special_characters(cli: Cli, tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
     assert not (weird / "f").exists()
     assert (upper_of(cli, weird) / "f").read_text(encoding="utf-8") == "x\n"
+
+
+def test_ac6_diff_and_listdiffs_show_pending_changes(cli: Cli, proj: Path) -> None:
+    """AC-6 (review part), FR-11, FR-16: diff and listdiffs show what the program did."""
+    result = cli("run", "-j", ".", "--", "sh", "-c", "echo hi > a.txt; rm old.txt", cwd=proj)
+    assert result.returncode == 0, result.stderr
+    listing = cli("listdiffs")
+    assert listing.returncode == 0
+    path, count, _ = listing.stdout.rstrip("\n").split("\t")
+    assert (path, count) == (str(proj), "2")
+    diff = cli("diff", str(proj))
+    assert diff.returncode == 0
+    assert "diff --git a/a.txt b/a.txt\nnew file mode 100644\n" in diff.stdout
+    assert "+hi\n" in diff.stdout
+    assert "diff --git a/old.txt b/old.txt\ndeleted file mode 100644\n" in diff.stdout
+    assert cli("diff", "--stat", ".", cwd=proj).stdout == (
+        "A\t1\t0\ta.txt\nD\t0\t1\told.txt\n2 changes: 1 added, 0 modified, 1 deleted\n"
+    )
+    assert not (proj / "a.txt").exists()
+    assert (proj / "old.txt").exists()
+
+
+def test_fr72_touch_and_chmod_back_are_not_changes(cli: Cli, proj: Path) -> None:
+    """FR-72: copy-ups without a net change do not show up."""
+    script = "touch file.txt; chmod 600 notes.txt; chmod 644 notes.txt; cat file.txt >/dev/null"
+    assert cli("run", "-j", ".", "--", "sh", "-c", script, cwd=proj).returncode == 0
+    assert cli("diff", ".", cwd=proj).stdout == ""
+    assert cli("listdiffs").stdout == ""
+
+
+def test_fr37_diff_of_a_jailed_file(cli: Cli, proj: Path) -> None:
+    """AC-14, FR-37: ``diff`` takes the file path; headers use the file name."""
+    notes = proj / "notes.txt"
+    assert cli("run", "-j", str(notes), "--", "sh", "-c", f"echo more >> {notes}").returncode == 0
+    diff = cli("diff", str(notes)).stdout
+    assert diff.startswith("diff --git a/notes.txt b/notes.txt\n")
+    assert diff.endswith(" notes\n+more\n")
+    assert cli("diff", str(proj)).stdout == ""
+
+
+def git_modes(state: dict[str, tuple[int, str]]) -> dict[str, tuple[int, str]]:
+    """Reduce modes to what git keeps: the file type and the executable bit."""
+    return {path: (mode & ~0o666, content) for path, (mode, content) in state.items()}
+
+
+@pytest.mark.parametrize(
+    ("tool", "exact_modes"),
+    [(["patch", "-p1", "--quiet"], True), (["git", "apply", "-"], False)],
+    ids=["patch", "git-apply"],
+)
+def test_fr13_real_diff_applies(
+    cli: Cli, proj: Path, tmp_path: Path, tool: list[str], exact_modes: bool
+) -> None:
+    """FR-13: the diff of real overlay changes turns a copy of the original into the merged view.
+
+    GNU patch applies exact permissions; git only keeps the executable bit.
+    """
+    if shutil.which(tool[0]) is None:
+        pytest.skip(f"{tool[0]} is not installed")
+    before = tmp_path / "before"
+    shutil.copytree(proj, before, symlinks=True)
+    assert cli("run", "-j", ".", "--", "sh", "-c", TRANSPARENCY_SCRIPT, cwd=proj).returncode == 0
+    merged = tmp_path / "merged"
+    merged.mkdir()
+    copy = cli(
+        "run", "-j", str(proj), "-w", str(merged), "--", "cp", "-a", f"{proj}/.", str(merged)
+    )
+    assert copy.returncode == 0, copy.stderr
+    patch = subprocess.run(
+        cli.command("diff", str(proj)), env=cli.env, capture_output=True, check=True
+    ).stdout
+    applied = subprocess.run(tool, cwd=before, input=patch, capture_output=True, check=False)
+    assert applied.returncode == 0, applied.stderr.decode()
+    if exact_modes:
+        assert snapshot(before) == snapshot(merged)
+    else:
+        assert git_modes(snapshot(before)) == git_modes(snapshot(merged))

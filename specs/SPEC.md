@@ -190,10 +190,34 @@ agent-sandbox diff [--stat] [--state-dir DIR] [--debug] PATH
   added/removed directories, permission changes, symlink changes, and (as a one-line
   note, not content) changed binary files.
 - FR-13: Output **SHOULD** be usable with `patch`/`git apply` for text changes where the
-  format allows it. Paths in the diff header are relative to `PATH`.
+  format allows it. Paths in the diff header are relative to `PATH`. Format details
+  (verified in Step 7: `git apply` and GNU `patch -p1` both apply the output to a copy of
+  the original and reproduce the merged view, except for binary content and empty
+  directories):
+  - git's extended format: `diff --git a/P b/P`, `new file mode`, `deleted file mode`,
+    `old mode`/`new mode`, and `index OLD..NEW [MODE]` with git blob hashes, then
+    `---`/`+++` and hunks with 3 lines of context and `\ No newline at end of file`
+    markers. For a jailed file (FR-37), `P` is the file's name.
+  - Modes show the exact permission bits (`100600`, `100755`). Symlinks are mode
+    `120000` with the target as content, as in git. GNU `patch` applies the exact
+    permissions; `git apply` keeps only the executable bit (git's file model).
+  - Paths are C-quoted like git (`"a/tab\tname"`, octal escapes for non-ASCII bytes);
+    unlike git, paths with spaces are quoted too, because GNU `patch` cuts names at
+    spaces otherwise.
+  - Changes a patch cannot express are comment lines starting with `# `, which both
+    tools ignore: `# added directory P/ (mode 0755)`, `# deleted directory P/`,
+    `# changed mode of directory P/ from 0755 to 0700`, `# binary file P modified`
+    (also `added`/`deleted`), `# added special file P`.
+  - Text files are compared line by line on `\n` only. A file is binary if its first
+    8000 bytes contain a NUL byte (git's rule). Bytes that are not UTF-8 are passed
+    through unchanged.
+  - Entries are sorted by path; a type change is a deletion followed by an addition.
 - FR-14: If there are no pending changes, print nothing and exit with 0.
 - FR-15: `--stat` **MAY** be supported to print a summary (files changed, added, deleted)
-  instead of the full diff.
+  instead of the full diff. Format: one line per change,
+  `STATUS<TAB>ADDED<TAB>DELETED<TAB>PATH`, with status `A`, `M` or `D`, line counts (`-`
+  for directories, binary and special files) and directories ending in `/`; then a
+  summary line `N changes: A added, M modified, D deleted`.
 
 ### 5.4 `listdiffs`
 
@@ -203,7 +227,13 @@ agent-sandbox listdiffs [--state-dir DIR] [--debug]
 
 - FR-16: Lists all jailed paths that currently have pending changes, one per line:
   absolute original path, number of changed entries, and last modification time of the
-  upper layer, separated by tabs.
+  upper layer, separated by tabs. The count is the number of changes as `diff --stat`
+  reports them (directories included). The time is the latest modification time of
+  any entry in the upper layer, as ISO 8601 local time with offset
+  (`2026-11-08T14:03:12+01:00`). Paths are quoted like in FR-13 if they contain special
+  characters, so tabs and newlines cannot break the format. Lines are sorted by path.
+  Broken state (unreadable `meta.json`, or a jail directory that does not match its
+  path) is skipped with a warning on stderr.
 - FR-17: Paths whose state exists but has no changes are not listed.
 - FR-18: Output is empty and exit code is 0 if nothing is pending.
 
@@ -421,12 +451,14 @@ directories is always shared **read-only**.
   program exits, whether it ends normally, by signal, or because of an error. `SIGTERM`
   and `SIGHUP` received while overlays are being set up or torn down also lead to a
   clean unmount (exit `128+S`).
-- FR-62: If the tool crashes or is killed hard, the next `run`, `listdiffs`, or `merge`
+- FR-62: If the tool crashes or is killed hard, the next `run`, `merge`, or `discard`
   **SHOULD** detect stale locks and stale mounts (dead PID) and clean them up. Pending
-  changes in upper layers **MUST NEVER** be lost during this cleanup. A stale mount is
-  a mount on a jail's `merged/` directory (according to `/proc/self/mountinfo`) while
-  nobody holds the jail's lock. It is unmounted with `fusermount3 -u`, falling back to
-  a lazy unmount (`-u -z`) if it is busy.
+  changes in upper layers **MUST NEVER** be lost during this cleanup. Cleanup is done
+  by the commands that take the jail's lock; `diff` and `listdiffs` only read the upper
+  layer, which a stale mount does not affect. A stale mount is a mount on a jail's
+  `merged/` directory (according to `/proc/self/mountinfo`) while nobody holds the
+  jail's lock. It is unmounted with `fusermount3 -u`, falling back to a lazy unmount
+  (`-u -z`) if it is busy.
 - FR-63: Failure to set up one overlay aborts the entire `run` with exit 125, and
   already-mounted overlays are unmounted before exit.
 
@@ -442,7 +474,8 @@ directories is always shared **read-only**.
   replaced directories are represented the way fuse-overlayfs does it (whiteouts and
   opaque directories). `diff`, `listdiffs`, `merge`, and `discard` **MUST** interpret
   that representation correctly. Observed representation (see [NOTES.md](NOTES.md)):
-  whiteouts are character devices 0:0, opaque directories carry the xattr
+  whiteouts are character devices 0:0 (or, where those cannot be created, files named
+  `.wh.NAME`), opaque directories carry the xattr
   `user.fuseoverlayfs.opaque` and a marker file `.wh..wh..opq` that is never reported
   or merged. Newly created directories are opaque too, so "opaque" does not mean
   "existed in lower". The upper layer may also contain unchanged copy-ups (for

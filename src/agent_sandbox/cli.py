@@ -1,6 +1,7 @@
 """Command-line interface of agent-sandbox."""
 
 import argparse
+import os
 import signal
 import sys
 import traceback
@@ -9,6 +10,7 @@ from dataclasses import dataclass
 from typing import NoReturn
 
 from agent_sandbox import __version__, session
+from agent_sandbox.diffing import diff_text, listdiffs_text
 from agent_sandbox.errors import AgentSandboxError, ExitCode, Terminated
 from agent_sandbox.options import (
     Command,
@@ -23,6 +25,8 @@ from agent_sandbox.options import (
     MountMode,
     RunOptions,
 )
+from agent_sandbox.pending import all_pending, find_pending, normalize_path
+from agent_sandbox.state import state_dir_location
 
 PROG = "agent-sandbox"
 
@@ -571,9 +575,46 @@ def _debug_logger(enabled: bool) -> Callable[[str], None]:
     return debug
 
 
+def write_output(text: str) -> None:
+    """Write output for programs to stdout, keeping undecodable bytes as they are (FR-5)."""
+    if not text:
+        return
+    sys.stdout.flush()
+    try:
+        sys.stdout.buffer.write(text.encode("utf-8", "surrogateescape"))
+        sys.stdout.buffer.flush()
+    except BrokenPipeError:
+        # The reader is gone (``diff | head``): stop quietly, like other command-line tools.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
+
+
+def _diff(command: DiffOptions) -> int:
+    debug = _debug_logger(command.debug)
+    state_dir = state_dir_location(command.state_dir, os.environ)
+    path = normalize_path(command.path, os.getcwd())
+    pending = find_pending(state_dir, path)
+    debug(f"state directory: {state_dir}")
+    debug(f"no state for {path}" if pending is None else f"jail: {pending.jail.root}")
+    write_output(diff_text(pending, command.stat))
+    return ExitCode.OK
+
+
+def _listdiffs(command: ListDiffsOptions) -> int:
+    state_dir = state_dir_location(command.state_dir, os.environ)
+    _debug_logger(command.debug)(f"state directory: {state_dir}")
+    write_output(listdiffs_text(all_pending(state_dir, warn)))
+    return ExitCode.OK
+
+
 def _dispatch(command: Command) -> int:
     if isinstance(command, RunOptions):
         return session.run(command, warn=warn, debug=_debug_logger(command.debug))
+    if isinstance(command, DiffOptions):
+        return _diff(command)
+    if isinstance(command, ListDiffsOptions):
+        return _listdiffs(command)
     raise AgentSandboxError(f"'{command.name}' is not implemented yet")
 
 
