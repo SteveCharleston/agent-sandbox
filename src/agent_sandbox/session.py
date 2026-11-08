@@ -9,12 +9,13 @@ from dataclasses import dataclass
 from types import FrameType
 
 from agent_sandbox.bwrap import SandboxPlan, build_command, format_command, plan_sandbox
+from agent_sandbox.config import config_location, resolve_run
 from agent_sandbox.deps import check_user_namespaces, find_bwrap, find_overlay_tools
 from agent_sandbox.envspec import build_environment, resolve_env_args
-from agent_sandbox.errors import ProgramNotFoundError, Terminated
+from agent_sandbox.errors import ProgramNotFoundError, Terminated, UsageError
 from agent_sandbox.layout import resolve_layout, system_mounts
 from agent_sandbox.mounts import MountSpec, plan_mounts
-from agent_sandbox.options import MountMode, RunOptions
+from agent_sandbox.options import LayoutChoice, MountMode, RunOptions
 from agent_sandbox.overlay import describe_mount, open_jail
 from agent_sandbox.programs import find_program, invisible_path_entries
 from agent_sandbox.seccomp import tty_injection_filter
@@ -44,18 +45,25 @@ def logical_cwd(cwd: str, env: Mapping[str, str]) -> str | None:
 def prepare(
     options: RunOptions, *, host_env: Mapping[str, str], cwd: str, warn: Log, debug: Log
 ) -> Prepared:
-    """Validate everything and plan the sandbox, without creating or starting anything."""
+    """Validate everything and plan the sandbox, without creating or starting anything.
+
+    ``options`` must have its profiles applied (``resolve_run``).
+    """
+    if options.program is None:
+        raise UsageError("no PROGRAM given")
     env = build_environment(host_env, resolve_env_args(options.env, warn))
-    layout = resolve_layout(options.layout)
+    layout = resolve_layout(options.layout or LayoutChoice.AUTO)
     system = system_mounts(layout)
     state_dir = state_dir_location(options.state_dir, host_env)
     debug(f"layout: {layout}")
     debug(f"state directory: {state_dir}")
+    protected = protected_files(options, host_env)
     mounts = plan_mounts(
         options.mounts,
         cwd=cwd,
         system_paths=[mount.path for mount in system],
         state_dir=state_dir,
+        protected_files=protected,
     )
     jails = tuple(spec for spec in mounts if spec.mode is MountMode.JAILED)
     plan = plan_sandbox(
@@ -72,13 +80,20 @@ def prepare(
         # Jails create the state directory before bwrap starts; it must be hidden then too.
         state_dir_exists=os.path.isdir(state_dir) or bool(jails),
         chdir=options.chdir,
-        network=options.network,
+        network=options.network is not False,
+        protected_files=protected,
     )
     missing = invisible_path_entries(plan)
     if missing:
         warn(f"PATH entries not visible in the sandbox (add them with -r): {', '.join(missing)}")
     debug(f"working directory: {plan.chdir}")
     return Prepared(plan, jails, state_dir)
+
+
+def protected_files(options: RunOptions, host_env: Mapping[str, str]) -> tuple[str, ...]:
+    """The configuration file, resolved, if it exists (FR-116); it is not read here."""
+    path = os.path.realpath(config_location(options.config, host_env)[0])
+    return (path,) if os.path.isfile(path) else ()
 
 
 def check_program(plan: SandboxPlan, debug: Log, *, mounted: bool) -> None:
@@ -121,6 +136,7 @@ def run(
     """Run the program in the sandbox and return its exit code (FR-60)."""
     host_env = os.environ if host_env is None else host_env
     cwd = os.getcwd() if cwd is None else cwd
+    options = resolve_run(options, host_env, warn, debug)
     prepared = prepare(options, host_env=host_env, cwd=cwd, warn=warn, debug=debug)
     plan = prepared.plan
     path = host_env.get("PATH")

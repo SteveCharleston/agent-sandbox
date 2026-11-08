@@ -210,19 +210,21 @@ def test_fr53_env_value_with_equals_signs_is_kept(argv: list[str]) -> None:
 
 
 def test_defaults() -> None:
-    """Section 5.2: defaults when no options are given."""
+    """Section 5.2, FR-115: nothing given is None, so profiles can fill it in."""
     options = parse_run("prog")
     assert options == RunOptions(
         program="prog",
         args=(),
         mounts=(),
         env=(),
-        network=True,
+        network=None,
         chdir=None,
-        layout=LayoutChoice.AUTO,
+        layout=None,
         state_dir=None,
         dry_run=False,
         debug=False,
+        profiles=(),
+        config=None,
     )
 
 
@@ -293,3 +295,31 @@ def test_fr6_fr7_fr10_split_run_args(
 ) -> None:
     """FR-6, FR-7, FR-10: the pre-split normalizes value options and keeps the rest."""
     assert split_run_args(args, VALUE_OPTIONS) == (options, program)
+
+
+def test_fr114_profiles_and_config_are_parsed() -> None:
+    """FR-114, FR-110: -p/--profile is repeatable; --config names the file."""
+    options = parse_run("-p", "base", "--profile=tool", "--config", "/c.toml", "prog")
+    assert options.profiles == ("base", "tool")
+    assert options.config == "/c.toml"
+
+
+def test_fr8_program_is_optional_with_a_profile() -> None:
+    """FR-8: with --profile, the program may come from the profile."""
+    options = parse_run("-p", "claude")
+    assert options.program is None
+    assert not options.args
+
+
+@pytest.mark.parametrize(
+    ("argv", "network"),
+    [
+        ([], None),
+        (["--no-network"], False),
+        (["--network"], True),
+        (["--network", "--no-network"], False),
+    ],
+)
+def test_fr115_network_flags(argv: list[str], network: bool | None) -> None:
+    """FR-115: --network and --no-network set the value; the last one wins."""
+    assert parse_run(*argv, "prog").network is network

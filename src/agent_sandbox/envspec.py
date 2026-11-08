@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from agent_sandbox.errors import UsageError
-from agent_sandbox.options import EnvArg, EnvArgKind
+from agent_sandbox.options import COMMAND_LINE, EnvArg, EnvArgKind
 
 BASELINE = ("PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LC_ALL", "TZ")
 
@@ -85,11 +85,17 @@ def read_env_file(path: str, warn: Warn) -> list[EnvEntry]:
 def resolve_env_args(args: Sequence[EnvArg], warn: Warn) -> EnvSpec:
     """Turn ``--env``/``--env-file`` arguments into entries, keeping their order (FR-55)."""
     entries: list[EnvEntry] = []
-    env_count = 0
+    counts: dict[str, int] = {}
     for arg in args:
         if arg.kind is EnvArgKind.ENTRY:
-            env_count += 1
-            entries.append(parse_entry(arg.value, f"--env #{env_count}"))
+            counts[arg.source] = counts.get(arg.source, 0) + 1
+            number = counts[arg.source]
+            label = (
+                f"--env #{number}"
+                if arg.source == COMMAND_LINE
+                else f"{arg.source}: env #{number}"
+            )
+            entries.append(parse_entry(arg.value, label))
         else:
             entries.extend(read_env_file(arg.value, warn))
     return EnvSpec(restricted=bool(args), entries=tuple(entries))

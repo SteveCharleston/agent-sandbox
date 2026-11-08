@@ -248,3 +248,13 @@ The first CI runs (commit `99322ea`) failed on all three Python versions with ex
 `dash` bug found in the containers ("Bad fd number"). From commit `47e7642` on, CI passes
 on Ubuntu 24.04 for Python 3.11, 3.12 and 3.13: quality gate green, 576 tests passed each,
 none skipped. The AppArmor `sysctl` step works on GitHub's runners.
+
+## Step 10 findings (profiles)
+
+- **Protecting the configuration file:** `--ro-bind /dev/null FILE` inside the user
+  namespace makes `FILE` a device node on a `nodev` mount, so reading and writing it
+  fail with "Permission denied" (not an empty file). That protects it equally well and
+  needs no extra file; FR-116 says so.
+- **Login shells** (`bash -l`, as in the example profile) print a terminal title
+  escape sequence from `/etc/profile` on NixOS, even without a terminal; tests look
+  for their output instead of comparing whole lines.

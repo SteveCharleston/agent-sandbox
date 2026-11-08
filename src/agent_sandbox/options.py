@@ -13,12 +13,19 @@ class MountMode(StrEnum):
     JAILED = "jail"
 
 
+COMMAND_LINE = "command line"
+
+
 @dataclass(frozen=True)
 class MountArg:
-    """A mount flag as given on the command line; the path is not resolved yet."""
+    """A mount flag as given; the path is not resolved yet.
+
+    ``source`` is ``"command line"`` or ``"profile NAME"`` (FR-115).
+    """
 
     mode: MountMode
     path: str
+    source: str = COMMAND_LINE
 
 
 class EnvArgKind(StrEnum):
@@ -30,10 +37,11 @@ class EnvArgKind(StrEnum):
 
 @dataclass(frozen=True)
 class EnvArg:
-    """An ``--env`` entry or ``--env-file`` path as given on the command line."""
+    """An ``--env`` entry or ``--env-file`` path, from the command line or a profile."""
 
     kind: EnvArgKind
     value: str
+    source: str = COMMAND_LINE
 
 
 class LayoutChoice(StrEnum):
@@ -47,20 +55,26 @@ class LayoutChoice(StrEnum):
 # One field per flag of `run`; grouping them would only obscure the mapping to the CLI.
 @dataclass(frozen=True)
 class RunOptions:  # pylint: disable=too-many-instance-attributes
-    """Options of ``agent-sandbox run``."""
+    """Options of ``agent-sandbox run``.
+
+    ``None`` means "not given": ``program`` may come from a profile, ``network`` and
+    ``layout`` from a profile or the defaults (shared, ``auto``). See FR-115.
+    """
 
     name: ClassVar[str] = "run"
 
-    program: str
+    program: str | None
     args: tuple[str, ...]
     mounts: tuple[MountArg, ...]
     env: tuple[EnvArg, ...]
-    network: bool
+    network: bool | None
     chdir: str | None
-    layout: LayoutChoice
+    layout: LayoutChoice | None
     state_dir: str | None
     dry_run: bool
     debug: bool
+    profiles: tuple[str, ...] = ()
+    config: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,4 +125,24 @@ class DiscardOptions:
     debug: bool
 
 
-Command: TypeAlias = RunOptions | DiffOptions | ListDiffsOptions | MergeOptions | DiscardOptions
+class ProfilesAction(StrEnum):
+    """What ``agent-sandbox profiles`` does."""
+
+    LIST = "list"
+    INIT = "init"
+
+
+@dataclass(frozen=True)
+class ProfilesOptions:
+    """Options of ``agent-sandbox profiles``."""
+
+    name: ClassVar[str] = "profiles"
+
+    action: ProfilesAction
+    config: str | None
+    debug: bool
+
+
+Command: TypeAlias = (
+    RunOptions | DiffOptions | ListDiffsOptions | MergeOptions | DiscardOptions | ProfilesOptions
+)

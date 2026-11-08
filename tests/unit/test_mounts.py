@@ -316,3 +316,49 @@ def test_fr38_ordered_by_depth_then_path(tree: Path, order: Sequence[str]) -> No
 def test_no_mounts(tree: Path) -> None:
     """Section 5.2: running without mount specs is allowed."""
     assert not plan(tree)
+
+
+# --- sources: profiles and the command line (FR-115, FR-116) ---
+
+
+def test_fr115_later_source_overrides_the_mode(tree: Path) -> None:
+    """FR-115: a mount of the same path from a later source replaces the earlier mode."""
+    specs = plan_mounts(
+        [MountArg(RO, "a", "profile base"), MountArg(RW, "a")],
+        cwd=str(tree),
+        system_paths=[],
+        state_dir=str(tree / "state"),
+    )
+    assert [(spec.path, spec.mode, spec.source) for spec in specs] == [
+        (str(tree / "a"), RW, "command line")
+    ]
+
+
+def test_fr115_conflict_within_one_profile(tree: Path) -> None:
+    """FR-34, FR-115: different modes for one path within one profile are an error."""
+    with pytest.raises(SetupError, match=r"is given with both -r and -j in profile base$"):
+        plan_mounts(
+            [MountArg(RO, "a", "profile base"), MountArg(JAIL, "a", "profile base")],
+            cwd=str(tree),
+            system_paths=[],
+            state_dir=str(tree / "state"),
+        )
+
+
+def test_fr115_messages_name_the_profile(tree: Path) -> None:
+    """FR-115: errors about a profile's mount name the profile."""
+    with pytest.raises(SetupError, match=r"^-r missing \(profile base\): No such file"):
+        resolve_mount(MountArg(RO, "missing", "profile base"), str(tree))
+
+
+def test_fr116_mount_on_the_configuration_file_is_rejected(tree: Path) -> None:
+    """FR-116: the configuration file itself cannot be mounted (exit 125)."""
+    config = tree / "a" / "file.txt"
+    with pytest.raises(SetupError, match="configuration file is never visible"):
+        plan_mounts(
+            [MountArg(RO, str(config))],
+            cwd=str(tree),
+            system_paths=[],
+            state_dir=str(tree / "state"),
+            protected_files=[str(config)],
+        )

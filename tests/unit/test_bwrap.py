@@ -394,3 +394,24 @@ def test_fr9_host_path_follows_deepest_bind(path: str, expected: str) -> None:
 def test_fr9_host_path_below_root_bind() -> None:
     """FR-9: a bind on ``/`` maps paths unchanged."""
     assert make_plan([MountSpec("/", RO, DIR)]).host_path("/x/y") == "/x/y"
+
+
+def test_fr116_configuration_file_is_covered_when_visible() -> None:
+    """FR-116: the configuration file gets /dev/null read-only on top, and is not visible."""
+    config = "/home/u/.config/agent-sandbox/config.toml"
+    covered = plan_sandbox(
+        system_mounts=FHS_MERGED,
+        mounts=[MountSpec("/home/u", RW, DIR)],
+        argv=("prog",),
+        env={},
+        cwd="/",
+        state_dir="/state",
+        state_dir_exists=False,
+        protected_files=[config],
+    )
+    assert covered.hidden_files == (config,)
+    assert filesystem_options(covered)[-1] == ["--ro-bind", "/dev/null", config]
+    assert not covered.is_visible(config)
+    assert covered.is_visible("/home/u/.config/agent-sandbox/other")
+    invisible = make_plan([MountSpec("/data", RO, DIR)])
+    assert not invisible.hidden_files

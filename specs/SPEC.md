@@ -33,7 +33,8 @@ location (`merge`) or throw them away (`discard`).
 - G2: Reuse host tools without a container image or VM.
 - G3: Support standard FHS Linux distributions and NixOS.
 - G4: Provide transparent, reviewable write isolation via fuse-overlayfs.
-- G5: Be a plain CLI with no daemon, no config file requirement, no interactive UI.
+- G5: Be a plain CLI with no daemon and no interactive UI. A configuration file with
+  named profiles is optional comfort (5.7); everything works without one.
 - G6: Work entirely as an unprivileged user. No root account, `sudo`, or other privilege
   escalation is needed to install configuration, run, review, merge, or discard (see 9.1).
 
@@ -59,6 +60,8 @@ The primary user is a developer who runs AI coding agents on their own workstati
 - UC4: Review what the agent changed (`diff`), then apply (`merge`) or reject (`discard`).
 - UC5: Run an arbitrary program, such as an interactive shell, in the same restricted
   environment for ad-hoc experiments.
+- UC6: Keep the mounts, environment and command for an agent in a named profile and
+  start it with `agent-sandbox run --profile NAME` instead of typing them each time.
 
 ## 4. Terminology
 
@@ -93,6 +96,7 @@ agent-sandbox [--help] [--version] <subcommand> [options] [arguments]
 | `listdiffs` | List all jailed paths that have pending changes. |
 | `merge <path>` | Apply pending changes to the real path, then clear them. |
 | `discard <path>` | Delete pending changes for a path. |
+| `profiles [list\|init]` | List the profiles of the configuration file, or create an example file (5.7). |
 
 ### 5.1 General requirements
 
@@ -114,12 +118,12 @@ Options common to all subcommands:
 |--------|---------|
 | `-h`, `--help` | Show help for the subcommand (FR-1). |
 | `--debug` | Show detailed steps and tracebacks on stderr (FR-92, FR-93). Also accepted before the subcommand (`agent-sandbox --debug run ...`). |
-| `--state-dir DIR` | Override the state directory (FR-80). |
+| `--state-dir DIR` | Override the state directory (FR-80); not for `profiles`. |
 
 ### 5.2 `run`
 
 ```
-agent-sandbox run [options] [--] PROGRAM [ARGS...]
+agent-sandbox run [options] [--] [PROGRAM [ARGS...]]
 ```
 
 #### Mount flags (all repeatable)
@@ -138,6 +142,9 @@ agent-sandbox run [options] [--] PROGRAM [ARGS...]
 | `--env NAME=VALUE` | Set `NAME` to `VALUE` inside the sandbox, regardless of the host (repeatable). See 6.4. |
 | `--env-file FILE` | Read `NAME` and `NAME=VALUE` entries from `FILE` (repeatable). See 6.4. |
 | `--no-network` | Disable network access in the sandbox. Network is shared by default. |
+| `--network` | Share the network, undoing `network = false` of a profile (FR-115). |
+| `-p NAME`, `--profile NAME` | Apply a profile of the configuration file; repeatable (5.7). |
+| `--config FILE` | Use this configuration file (FR-110). |
 | `--chdir DIR` | Working directory inside the sandbox. Default: current directory if visible, else `/`. |
 | `--layout {auto,fhs,nixos}` | Override host layout detection. Default: `auto`. |
 | `--state-dir DIR` | Override state directory (see 8.1). |
@@ -155,7 +162,8 @@ agent-sandbox run [options] [--] PROGRAM [ARGS...]
 - FR-7: A literal `--` **MUST** end option parsing explicitly. Everything after it is
   the program and its arguments, even if it looks like a flag. Example:
   `agent-sandbox run -j ~/p -- /bin/prog -j -w -v -r`.
-- FR-8: If no program is given, `run` **MUST** fail with exit code 2 and a clear message.
+- FR-8: If no program is given, `run` **MUST** fail with exit code 2 and a clear message,
+  unless a selected profile defines a `command` (FR-115).
 - FR-9: If `PROGRAM` contains no `/`, it **MUST** be resolved via `$PATH` as seen inside
   the sandbox. If resolution fails, `run` fails with a clear message (exit 127, see 5.6).
   "Seen inside the sandbox" means: the sandbox's `PATH` (after 6.4), only entries
@@ -311,6 +319,108 @@ agent-sandbox discard [-y] [--state-dir DIR] [--debug] PATH
 | `127` | `run`: program not found. |
 | *N* | `run`: otherwise the exit code of the program. |
 | `128+S` | `run`: the program was killed by signal `S`. |
+
+### 5.7 Profiles and the configuration file
+
+A profile is a named set of `run` options in an optional configuration file. Profiles
+only apply when selected with `--profile`; without a configuration file, or without
+`--profile`, `run` behaves exactly as described above.
+
+```
+agent-sandbox run --profile NAME [--profile NAME...] [options] [--] [PROGRAM [ARGS...]]
+agent-sandbox profiles [list] [--config FILE] [--debug]
+agent-sandbox profiles init [--config FILE] [--debug]
+```
+
+Example:
+
+```toml
+[profiles.base]
+description = "The current project, jailed, without network"
+jail = ["."]
+ro = ["~/.gitconfig"]
+network = false
+
+[profiles.claude]
+description = "Claude Code on the current project"
+extends = ["base"]
+rw = ["~/.claude", "~/.claude.json"]
+env = ["ANTHROPIC_API_KEY"]
+network = true
+command = ["claude"]
+```
+
+- FR-110: **Location.** The configuration file is, in order of precedence: `--config
+  FILE` if given, else `$AGENT_SANDBOX_CONFIG` if set, else
+  `$XDG_CONFIG_HOME/agent-sandbox/config.toml` if `$XDG_CONFIG_HOME` is set and
+  absolute, else `~/.config/agent-sandbox/config.toml`. `--config` is accepted by `run`
+  and `profiles`.
+- FR-111: **Optional.** The file is read only by `run` with at least one `--profile`
+  and by `profiles`. `run` without `--profile` never reads it, so a broken or missing
+  file cannot affect it. A file named explicitly (`--config` or
+  `$AGENT_SANDBOX_CONFIG`) that does not exist is an error when it is read; a missing
+  file at the default location means "no profiles".
+- FR-112: **Format.** TOML (read with Python's `tomllib`). The only top-level key is the
+  table `profiles`; each `[profiles.NAME]` is a profile. Names match
+  `[A-Za-z0-9][A-Za-z0-9_.-]*`. Keys of a profile, all optional:
+
+  | Key | Type | Meaning |
+  |-----|------|---------|
+  | `description` | string | shown by `profiles` |
+  | `extends` | list of profile names | applied before this profile, in order |
+  | `ro`, `rw`, `jail` | list of paths | like `-r`, `-w`, `-j` |
+  | `env` | list of `NAME` or `NAME=VALUE` | like `--env` |
+  | `env-file` | list of paths | like `--env-file` |
+  | `network` | boolean | `false` like `--no-network`, `true` like `--network` |
+  | `chdir` | string | like `--chdir` |
+  | `layout` | `"auto"`, `"fhs"` or `"nixos"` | like `--layout` |
+  | `state-dir` | string | like `--state-dir` (only for `run`; `diff`, `merge` and `discard` need the same `--state-dir`) |
+  | `command` | non-empty list of strings | the program and its arguments, used when `run` gets no `PROGRAM` |
+
+  Unknown keys, wrong types, invalid names, unknown profiles in `extends` and cycles
+  are errors that name the file and the profile. All configuration errors exit with
+  2 (usage error).
+- FR-113: **Paths** in a profile are interpreted exactly like on the command line: a
+  leading `~` is expanded, and relative paths are relative to the current directory
+  when `run` is started, so `jail = ["."]` means the directory you are in. Within a
+  profile, `env-file` entries are applied before `env` entries.
+- FR-114: **Selection.** `-p NAME`/`--profile NAME` is repeatable. Each selected profile
+  is expanded with its `extends` (depth-first, `extends` before the profile itself);
+  a profile that occurs more than once is applied only at its first position.
+  Unknown names are an error listing the defined profiles.
+- FR-115: **Layering.** The expanded profiles are applied in order, then the
+  command-line options:
+  - Mounts and environment entries are added up in that order; for environment
+    entries, the last entry for a name wins (FR-55). Environment entries from a
+    profile restrict the environment like `--env` does (FR-51).
+  - If the same resolved path is mounted by several sources (a profile, or the command
+    line), the last source's mode wins, so `-w ~/x` on the command line overrides a
+    profile's `ro = ["~/x"]`. Within one source, different modes for one path stay an
+    error (FR-34).
+  - `network`, `chdir`, `layout` and `state-dir`: the last value set wins.
+    `--network` and `--no-network` on the command line set `network`.
+  - A `PROGRAM` on the command line replaces the profiles' `command` completely;
+    otherwise the last profile with a `command` provides it.
+  - `--dry-run` and `--debug` exist only on the command line. `--debug` lists the
+    configuration file and the applied profiles in order.
+- FR-116: **Protection of the configuration file.** A program could widen its own
+  access for the next run by editing a profile, so the configuration file **MUST NOT**
+  be writable or readable inside the sandbox. If it exists and a mount would show it,
+  `/dev/null` is bound read-only over it. Device nodes do not work on mounts made in a
+  user namespace, so reading and writing it fail with "Permission denied" (verified in
+  Step 10). A mount spec on the file itself is an error (exit 125). The real path
+  (after symlinks) is protected.
+- FR-117: **Secrets.** Values from `env` entries in profiles are never printed (FR-58).
+  If a profile contains `NAME=VALUE` entries and the file is readable by group or
+  others, `run` and `profiles` warn.
+- FR-118: **`profiles` / `profiles list`** reads and validates the whole file and
+  prints one line per profile, sorted by name: `NAME<TAB>DESCRIPTION`. Without a
+  configuration file it prints nothing to stdout, says on stderr where the file would
+  be and how to create one, and exits with 0.
+- FR-119: **`profiles init`** writes a commented example configuration file with mode
+  0600 (creating missing parent directories with mode 0700) and prints its path. It
+  never overwrites: if the file exists, it fails with exit 1. The example is valid
+  (it passes FR-112) and its example profile works without further files.
 
 ## 6. Sandbox Behavior (`run`)
 
@@ -799,6 +909,24 @@ mount spec paths is created or modified in `$HOME`.
 **AC-17: Code quality (10.2, 10.3)**
 `uv run black --check . && uv run isort --check . && uv run flake8 && uv run pylint src tests && uv run mypy src tests && uv run pytest`
 all succeed.
+
+**AC-18: Profiles (FR-110 to FR-115)**
+```
+agent-sandbox profiles init
+agent-sandbox profiles                      # -> example<TAB>...
+agent-sandbox run --profile example         # jailed current directory, bash, no network
+agent-sandbox run -p base -w ~/scratch -- my-agent --flag
+```
+The second `run` gets the profile's mounts plus `-w ~/scratch`, runs `my-agent --flag`
+instead of the profile's command, and the command-line options win over the profile.
+
+**AC-19: Configuration file protection (FR-116)**
+`run -w ~ -- sh -c 'cat ~/.config/agent-sandbox/config.toml; echo x >> ...'`: reading
+and writing fail with "Permission denied"; the real file is unchanged.
+
+**AC-20: Without a configuration file (FR-111)**
+With no configuration file (or a broken one), every example above that does not use
+`--profile` works unchanged.
 
 ## 12. Decisions on Former Open Questions
 

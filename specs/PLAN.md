@@ -50,6 +50,7 @@ src/agent_sandbox/
     pending.py       # finding jails with pending changes in the state directory
     diffing.py       # diff, listdiffs, stat (5.3, 5.4)
     merging.py       # merge and discard (5.5)
+    config.py        # configuration file and profiles (5.7)
 tests/
     unit/            # pure tests, no bwrap needed
     integration/     # @pytest.mark.integration, skipped without bwrap/FUSE
@@ -327,6 +328,36 @@ on NixOS (Python 3.13 and 3.11) and on three FHS distributions in containers: De
 (Python 3.11), Fedora 45 (Python 3.15) and Ubuntu 24.04 (Python 3.12), see `NOTES.md`.
 CI (`.github/workflows/ci.yml`) repeats this on Ubuntu 24.04 for Python 3.11 to 3.13.
 The `v0.1.0` tag is left to the maintainer.
+
+---
+
+## Step 10: Profiles and the Configuration File (after v1.0.0)
+
+**Spec:** FR-8 (changed), FR-110 to FR-119, section 5.2 (new options), AC-18 to AC-20
+
+**Tasks**
+- `config.py`: file location (FR-110), loading with `tomllib` and strict validation
+  (FR-112), `extends` expansion with cycle detection (FR-114), and layering of the
+  selected profiles and the command line into the final `RunOptions` (FR-115). The
+  example file for `profiles init` (FR-119).
+- CLI: `-p/--profile`, `--config`, `--network` for `run`; `PROGRAM` becomes optional;
+  new subcommand `profiles [list|init]`. Parsed options keep "not given" (`None`) for
+  single values, so layering can tell them apart from defaults.
+- Mount sources: `MountArg`/`MountSpec` remember where they come from, so a later
+  source can override the mode of a path (FR-115) and messages name the profile.
+- Protection (FR-116): reject a mount spec on the configuration file; otherwise bind
+  `/dev/null` read-only over it when a mount shows it.
+- Warnings for readable files with secrets (FR-117).
+
+**Tests**
+- Unit: location precedence, every validation error, `extends` order and cycles,
+  layering rules (lists, last-wins values, mount override, command replacement),
+  `profiles` and `profiles init` output, the example file is valid, protection in the
+  bwrap plan.
+- Integration: AC-18 to AC-20 with a real sandbox.
+
+**Milestone:** `agent-sandbox run --profile NAME` starts an agent with a stored setup;
+nothing changes for users without a configuration file.
 
 ---
 

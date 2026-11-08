@@ -13,14 +13,20 @@ from agent_sandbox.options import (
     DiscardOptions,
     ListDiffsOptions,
     MergeOptions,
+    ProfilesAction,
+    ProfilesOptions,
 )
 
-SUBCOMMANDS = ["run", "diff", "listdiffs", "merge", "discard"]
+SUBCOMMANDS = ["run", "diff", "listdiffs", "merge", "discard", "profiles"]
 
 COMMON_OPTIONS = ["-h", "--help", "--state-dir", "--debug"]
 
 SUBCOMMAND_OPTIONS = {
     "run": [
+        "-p",
+        "--profile",
+        "--config",
+        "--network",
         "-r",
         "--ro",
         "-w",
@@ -36,8 +42,9 @@ SUBCOMMAND_OPTIONS = {
     ],
     "diff": ["--stat"],
     "listdiffs": [],
-    "merge": ["-y", "--yes", "--dry-run"],
+    "merge": ["-y", "--yes", "--dry-run", "--force"],
     "discard": ["-y", "--yes"],
+    "profiles": ["--config", "list|init"],
 }
 
 
@@ -83,7 +90,8 @@ def test_fr1_subcommand_help_is_comprehensive(
     assert captured.err == ""
     out = captured.out
     assert out.startswith(f"usage: agent-sandbox {name}")
-    for option in COMMON_OPTIONS + SUBCOMMAND_OPTIONS[name]:
+    common = [option for option in COMMON_OPTIONS if name != "profiles" or option != "--state-dir"]
+    for option in common + SUBCOMMAND_OPTIONS[name]:
         assert option in out, option
     assert f"examples:\n  agent-sandbox {name}" in out
     assert "exit codes:" in out
@@ -222,3 +230,24 @@ def test_fr100_no_warning_as_normal_user(
     monkeypatch.setattr("os.geteuid", lambda: 1000)
     assert main(["listdiffs", "--state-dir", str(tmp_path)]) == 0
     assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(
+    ("argv", "action"),
+    [
+        (["profiles"], ProfilesAction.LIST),
+        (["profiles", "list"], ProfilesAction.LIST),
+        (["profiles", "init"], ProfilesAction.INIT),
+    ],
+)
+def test_fr118_fr119_profiles_subcommand(argv: list[str], action: ProfilesAction) -> None:
+    """FR-118, FR-119: profiles [list|init] with --config and --debug."""
+    assert parse_command([*argv, "--config", "/c.toml"]) == ProfilesOptions(
+        action=action, config="/c.toml", debug=False
+    )
+
+
+def test_fr118_profiles_has_no_state_dir(capsys: pytest.CaptureFixture[str]) -> None:
+    """Section 5.1: profiles does not take --state-dir."""
+    assert main(["profiles", "--state-dir=/s"]) == 2
+    assert "unrecognized arguments: --state-dir" in capsys.readouterr().err

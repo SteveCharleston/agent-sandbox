@@ -88,6 +88,7 @@ automatically; `--layout` overrides it.
 | `--env NAME`, `--env NAME=VALUE` | pass only these variables (plus `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `LANG`, `LC_ALL`, `TZ`); `NAME=VALUE` sets a value |
 | `--env-file FILE` | the same, one entry per line; `#` starts a comment line |
 | `--no-network` | no network (only loopback) |
+| `-p NAME`, `--profile NAME` | apply a profile from the configuration file (see [Profiles](#profiles)) |
 | `--chdir DIR` | working directory (default: the current one if visible, else `/`) |
 | `--dry-run` | print the `bwrap` command (values masked) and exit |
 | `--debug` | show each step on stderr |
@@ -121,6 +122,48 @@ agent-sandbox run -j ~/notes.txt -- my-editor ~/notes.txt
 agent-sandbox run --dry-run -r ~/docs -- ls ~/docs
 ```
 
+## Profiles
+
+Setups you use often can be stored as **profiles** in an optional configuration file,
+`~/.config/agent-sandbox/config.toml` (or `$XDG_CONFIG_HOME/agent-sandbox/config.toml`,
+`$AGENT_SANDBOX_CONFIG`, `--config FILE`). Profiles only apply when you select them;
+without `--profile`, the file is not even read.
+
+```sh
+agent-sandbox profiles init        # writes a commented example (mode 0600)
+agent-sandbox profiles             # lists the profiles
+agent-sandbox run --profile claude # starts the profile's command
+```
+
+```toml
+[profiles.base]
+description = "The current project, jailed, without network"
+jail = ["."]                         # "." is the directory you start agent-sandbox in
+ro = ["~/.gitconfig"]
+network = false
+
+[profiles.claude]
+description = "Claude Code on the current project"
+extends = ["base"]
+rw = ["~/.claude", "~/.claude.json"]
+env = ["ANTHROPIC_API_KEY"]
+network = true
+command = ["claude"]
+```
+
+A profile may set everything `run` accepts: `ro`, `rw`, `jail`, `env`, `env-file`,
+`network`, `chdir`, `layout`, `state-dir`, plus `command`, `description` and `extends`.
+Profiles combine in order (`-p a -p b`, and `extends` first): mounts and environment
+entries add up, a later mount of the same path changes its mode, and single values
+and the command come from the last one that sets them. Options on the command line
+come last, so `run -p base -w ~/scratch --network -- other-agent` works as expected.
+Paths behave like on the command line (`~` expanded, relative to the current
+directory).
+
+The configuration file is never readable or writable inside the sandbox, so a
+program cannot widen its own access for the next run. Keep it private
+(`chmod 600`) if it contains `NAME=VALUE` entries; agent-sandbox warns otherwise.
+
 ## Reviewing jailed changes
 
 Changes from several runs accumulate until you merge or discard them.
@@ -148,8 +191,8 @@ refused. Pending changes live in `$AGENT_SANDBOX_STATE_DIR`, else
 | Code | Meaning |
 |------|---------|
 | `0` | success |
-| `1` | error in `diff`, `listdiffs`, `merge` or `discard` (including a refused merge) |
-| `2` | usage error |
+| `1` | error in `diff`, `listdiffs`, `merge`, `discard` or `profiles` (including a refused merge) |
+| `2` | usage error, including errors in the configuration file |
 | `125` | `run`: the sandbox could not be set up |
 | `127` | `run`: the program does not exist in the sandbox |
 | *N* | `run`: the program's exit code |

@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import NoReturn
 
-from agent_sandbox import __version__, merging, session
+from agent_sandbox import __version__, config, merging, session
 from agent_sandbox.diffing import diff_text, listdiffs_text
 from agent_sandbox.errors import AgentSandboxError, ExitCode, Terminated
 from agent_sandbox.options import (
@@ -23,6 +23,8 @@ from agent_sandbox.options import (
     MergeOptions,
     MountArg,
     MountMode,
+    ProfilesAction,
+    ProfilesOptions,
     RunOptions,
 )
 from agent_sandbox.pending import all_pending, find_pending, normalize_path
@@ -44,20 +46,24 @@ typical workflow:
   agent-sandbox diff ~/git/myproject                 review the changes
   agent-sandbox merge ~/git/myproject                apply them (or: discard)
 
+Frequently used setups can be stored as profiles in an optional configuration
+file and started with 'agent-sandbox run --profile NAME'; see
+'agent-sandbox profiles --help'.
+
 Run 'agent-sandbox <subcommand> --help' for details on a subcommand.
 No root access or sudo is needed for anything.
 
 exit codes:
   0       success
-  1       error in diff, listdiffs, merge or discard
-  2       usage error
+  1       error in diff, listdiffs, merge, discard or profiles
+  2       usage error, including errors in the configuration file
   125     run: the sandbox could not be set up
   127     run: PROGRAM not found
   N       run: exit code of PROGRAM
   128+S   run: PROGRAM was killed by signal S
 """
 
-RUN_USAGE = "%(prog)s [options] [--] PROGRAM [ARGS...]"
+RUN_USAGE = "%(prog)s [options] [--] [PROGRAM [ARGS...]]"
 
 RUN_DESCRIPTION = """\
 Run PROGRAM with ARGS inside a bubblewrap sandbox.
@@ -73,6 +79,7 @@ unless --env or --env-file is used. The network is shared unless --no-network is
 used.
 
 PROGRAM is looked up in $PATH as seen inside the sandbox if it contains no '/'.
+It may be left out if a selected profile defines a command.
 """
 
 RUN_EPILOG = """\
@@ -108,6 +115,16 @@ jailed writes (-j):
     - new files created next to it are not kept; they are lost when the
       sandbox exits
 
+profiles (-p NAME):
+  A profile from the configuration file supplies options, as if they were given
+  before the command-line options. Several profiles (and their 'extends') are
+  applied in order: mounts and environment entries add up, a later mount of the
+  same path changes its mode, single values (network, chdir, layout, state-dir)
+  and the command are taken from the last one that sets them, and options on
+  the command line come last. A PROGRAM on the command line replaces the
+  profile's command. Without -p, the configuration file is not read at all.
+  See 'agent-sandbox profiles --help'.
+
 requirements:
   bwrap (bubblewrap); for -j also fuse-overlayfs and fusermount3. Unprivileged
   user namespaces must be enabled. No root access or sudo is needed.
@@ -119,11 +136,13 @@ examples:
   agent-sandbox run -j ~/git/myproject --env API_KEY --env DEBUG=1 -- my-agent
   agent-sandbox run --no-network -r ~/data -- python3 analyze.py
   agent-sandbox run --dry-run -r ~/docs -- ls ~/docs
+  agent-sandbox run --profile claude
+  agent-sandbox run -p base -w ~/scratch -- my-agent --flag
 
 exit codes:
   N       exit code of PROGRAM
   128+S   PROGRAM was killed by signal S
-  2       usage error
+  2       usage error, including errors in the configuration file
   125     the sandbox could not be set up (bwrap or overlay failure, missing
           dependency, invalid path)
   127     PROGRAM not found
@@ -200,6 +219,45 @@ changed. Asks for confirmation first, unless --yes is given. Refuses to run
 while a session uses PATH.
 """
 
+PROFILES_DESCRIPTION = """\
+Profiles are named sets of 'run' options in an optional TOML configuration
+file. They only apply when selected with 'agent-sandbox run --profile NAME';
+everything works without a configuration file.
+
+  list (default)  print one line per profile: NAME<TAB>DESCRIPTION
+  init            write a commented example configuration file (mode 0600);
+                  an existing file is never overwritten
+
+The configuration file is --config FILE if given, else $AGENT_SANDBOX_CONFIG,
+else $XDG_CONFIG_HOME/agent-sandbox/config.toml, else
+~/.config/agent-sandbox/config.toml. It is never visible inside the sandbox.
+"""
+
+PROFILES_EPILOG = """\
+configuration file:
+  [profiles.claude]
+  description = "Claude Code on the current project"
+  extends = ["base"]                  # profiles applied before this one
+  jail = ["."]                        # like -j; also ro = [...] and rw = [...]
+  env = ["ANTHROPIC_API_KEY"]         # like --env; also env-file = [...]
+  network = true                      # false like --no-network
+  command = ["claude"]                # used when run gets no PROGRAM
+  # also: chdir = "dir", layout = "auto", state-dir = "dir"
+
+  "~" is the home directory; relative paths are relative to the directory
+  agent-sandbox is started in, so "." is the current project.
+
+examples:
+  agent-sandbox profiles init
+  agent-sandbox profiles
+  agent-sandbox run --profile example
+
+exit codes:
+  0       success, also if there is no configuration file
+  1       error (profiles init: the file already exists)
+  2       errors in the configuration file
+"""
+
 DISCARD_EPILOG = """\
 examples:
   agent-sandbox discard ~/git/myproject
@@ -255,31 +313,60 @@ def _value_options(actions: Iterable[argparse.Action]) -> dict[str, str]:
     return result
 
 
-def _add_common_options(parser: argparse.ArgumentParser) -> list[argparse.Action]:
-    return [
-        parser.add_argument("-h", "--help", action="help", help="Show this help and exit."),
-        parser.add_argument(
-            "--state-dir",
-            metavar="DIR",
-            help=(
-                "Directory that holds jailed changes. Default: $AGENT_SANDBOX_STATE_DIR if "
-                "set, else $XDG_STATE_HOME/agent-sandbox, else ~/.local/state/agent-sandbox."
-            ),
-        ),
+def _add_common_options(
+    parser: argparse.ArgumentParser, *, state_dir: bool = True
+) -> list[argparse.Action]:
+    actions = [parser.add_argument("-h", "--help", action="help", help="Show this help and exit.")]
+    if state_dir:
+        actions.append(
+            parser.add_argument(
+                "--state-dir",
+                metavar="DIR",
+                help=(
+                    "Directory that holds jailed changes. Default: $AGENT_SANDBOX_STATE_DIR "
+                    "if set, else $XDG_STATE_HOME/agent-sandbox, else "
+                    "~/.local/state/agent-sandbox."
+                ),
+            )
+        )
+    actions.append(
         parser.add_argument(
             "--debug",
             action="store_true",
             default=argparse.SUPPRESS,
             help="Print detailed steps and tracebacks to stderr.",
+        )
+    )
+    return actions
+
+
+def _add_config_option(add_argument: Callable[..., argparse.Action]) -> argparse.Action:
+    return add_argument(
+        "--config",
+        metavar="FILE",
+        help=(
+            "Configuration file with profiles. Default: $AGENT_SANDBOX_CONFIG if set, else "
+            "$XDG_CONFIG_HOME/agent-sandbox/config.toml, else "
+            "~/.config/agent-sandbox/config.toml."
         ),
-    ]
+    )
 
 
 def _add_run_options(parser: argparse.ArgumentParser) -> list[argparse.Action]:
+    profiles = parser.add_argument_group("profile options")
     mounts = parser.add_argument_group("mount options (repeatable)")
     env = parser.add_argument_group("environment options (repeatable)")
     sandbox = parser.add_argument_group("sandbox options")
     return [
+        profiles.add_argument(
+            "-p",
+            "--profile",
+            dest="profiles",
+            action="append",
+            metavar="NAME",
+            help="Apply the profile NAME from the configuration file. Repeatable.",
+        ),
+        _add_config_option(profiles.add_argument),
         mounts.add_argument(
             "-r",
             "--ro",
@@ -333,8 +420,16 @@ def _add_run_options(parser: argparse.ArgumentParser) -> list[argparse.Action]:
         sandbox.add_argument(
             "--no-network",
             dest="network",
-            action="store_false",
+            action="store_const",
+            const=False,
             help="Disable network access. Default: the network is shared.",
+        ),
+        sandbox.add_argument(
+            "--network",
+            dest="network",
+            action="store_const",
+            const=True,
+            help="Share the network even if a profile sets network = false.",
         ),
         sandbox.add_argument(
             "--chdir",
@@ -347,7 +442,6 @@ def _add_run_options(parser: argparse.ArgumentParser) -> list[argparse.Action]:
         sandbox.add_argument(
             "--layout",
             choices=[choice.value for choice in LayoutChoice],
-            default=LayoutChoice.AUTO.value,
             help=(
                 "Host layout that decides which system directories are shared. "
                 "Default: auto (detected)."
@@ -450,6 +544,24 @@ def _build_parsers() -> _Parsers:
     discard.add_argument("path", metavar="PATH", help="The jailed path, as given to 'run -j'.")
     discard.add_argument("-y", "--yes", action="store_true", help="Do not ask for confirmation.")
 
+    profiles = add_subcommand(
+        "profiles",
+        "List the profiles of the configuration file, or create one.",
+        PROFILES_DESCRIPTION,
+        PROFILES_EPILOG,
+    )
+    profiles.usage = "%(prog)s [-h] [--config FILE] [--debug] [list|init]"
+    _add_common_options(profiles, state_dir=False)
+    _add_config_option(profiles.add_argument)
+    profiles.add_argument(
+        "action",
+        nargs="?",
+        choices=[action.value for action in ProfilesAction],
+        default=ProfilesAction.LIST.value,
+        metavar="list|init",
+        help="list the profiles (default) or create an example configuration file",
+    )
+
     return _Parsers(
         main=top,
         subcommands={
@@ -458,6 +570,7 @@ def _build_parsers() -> _Parsers:
             "listdiffs": listdiffs,
             "merge": merge,
             "discard": discard,
+            "profiles": profiles,
         },
         run_value_options=_value_options(run_actions),
     )
@@ -533,19 +646,25 @@ def parse_command(argv: Sequence[str]) -> Command:
         subparser.error(f"unrecognized arguments: {' '.join(unknown)}")
     match args.command:
         case "run":
-            if not program:
+            if not program and not args.profiles:
                 subparser.error("no PROGRAM given")
             return RunOptions(
-                program=program[0],
+                program=program[0] if program else None,
                 args=tuple(program[1:]),
                 mounts=tuple(args.mounts or ()),
                 env=tuple(args.env or ()),
                 network=args.network,
                 chdir=args.chdir,
-                layout=LayoutChoice(args.layout),
+                layout=None if args.layout is None else LayoutChoice(args.layout),
                 state_dir=args.state_dir,
                 dry_run=args.dry_run,
                 debug=args.debug,
+                profiles=tuple(args.profiles or ()),
+                config=args.config,
+            )
+        case "profiles":
+            return ProfilesOptions(
+                action=ProfilesAction(args.action), config=args.config, debug=args.debug
             )
         case "diff":
             return DiffOptions(
@@ -651,6 +770,8 @@ def _dispatch(command: Command) -> int:
             return merging.merge(command, _IO, host_env=os.environ, cwd=os.getcwd())
         case DiscardOptions():
             return merging.discard(command, _IO, host_env=os.environ, cwd=os.getcwd())
+        case ProfilesOptions():
+            return config.profiles_command(command, write_output, warn, os.environ)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

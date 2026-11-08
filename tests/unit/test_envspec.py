@@ -349,3 +349,13 @@ def test_fr58_cli_warns_about_readable_env_file(
     assert main(["run", "--dry-run", "--env-file", str(path), "sh"]) == 0
     err = capsys.readouterr().err
     assert f"agent-sandbox: warning: env file {path} is readable by group or others" in err
+
+
+def test_fr115_profile_env_errors_name_the_profile() -> None:
+    """FR-115: env entries from a profile are numbered per profile in messages."""
+    args = [
+        EnvArg(EnvArgKind.ENTRY, "OK", "profile base"),
+        EnvArg(EnvArgKind.ENTRY, "1BAD=x", "profile base"),
+    ]
+    with pytest.raises(UsageError, match=r"^profile base: env #2: invalid variable name '1BAD'"):
+        resolve_env_args(args, Warnings())

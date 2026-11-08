@@ -50,6 +50,7 @@ class SandboxPlan:  # pylint: disable=too-many-instance-attributes
     home_tmpfs: str | None = None
     aliases: tuple[tuple[str, str], ...] = ()
     hidden: tuple[str, ...] = ()
+    hidden_files: tuple[str, ...] = ()
 
     def visible_roots(self) -> tuple[str, ...]:
         """Paths below which host content is visible in the sandbox."""
@@ -61,7 +62,7 @@ class SandboxPlan:  # pylint: disable=too-many-instance-attributes
 
     def is_visible(self, path: str) -> bool:
         """Whether the host's ``path`` (absolute, normalized) is visible in the sandbox."""
-        return _visible(path, self.visible_roots(), self.hidden)
+        return _visible(path, self.visible_roots(), self.hidden + self.hidden_files)
 
     def host_path(self, path: str) -> str:
         """Where the sandbox's ``path`` comes from on the host (through the deepest bind).
@@ -109,6 +110,7 @@ def plan_sandbox(  # pylint: disable=too-many-arguments,too-many-locals
     logical_cwd: str | None = None,
     chdir: str | None = None,
     network: bool = True,
+    protected_files: Sequence[str] = (),
 ) -> SandboxPlan:
     """Combine validated inputs into a sandbox plan.
 
@@ -116,6 +118,7 @@ def plan_sandbox(  # pylint: disable=too-many-arguments,too-many-locals
       it (FR-22).
     - Aliases of symlinked mount specs become symlinks unless already covered (FR-31).
     - The state directory is hidden if a mount would show it (FR-39).
+    - Protected files (the configuration file) are covered by ``/dev/null`` (FR-116).
     - The working directory is ``chdir`` if given, else the current directory if it is
       visible (preferring the logical ``$PWD`` spelling), else ``/`` (section 5.2).
     """
@@ -126,6 +129,7 @@ def plan_sandbox(  # pylint: disable=too-many-arguments,too-many-locals
         return any(is_within(path, root) for root in bound)
 
     hidden = (state_dir,) if state_dir_exists and covered(state_dir) else ()
+    hidden_files = tuple(path for path in protected_files if covered(path))
     aliases = tuple(
         (alias, spec.path)
         for spec in mounts
@@ -153,6 +157,7 @@ def plan_sandbox(  # pylint: disable=too-many-arguments,too-many-locals
         home_tmpfs=home_tmpfs,
         aliases=aliases,
         hidden=hidden,
+        hidden_files=hidden_files,
     )
 
 
@@ -177,6 +182,8 @@ def _filesystem_options(plan: SandboxPlan) -> list[list[str]]:
         add(bind.dest, _SPEC, ["--bind" if bind.writable else "--ro-bind", bind.source, bind.dest])
     for alias, target in plan.aliases:
         add(alias, _ALIAS, ["--symlink", target, alias])
+    for path in plan.hidden_files:
+        add(path, _HIDE, ["--ro-bind", "/dev/null", path])
     for path in plan.hidden:
         add(path, _HIDE, ["--tmpfs", path])
         add(path, _HIDE_RO, ["--remount-ro", path])
