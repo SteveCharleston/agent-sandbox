@@ -1,6 +1,6 @@
 [project]
 name = "agent-sandbox"
-version = "1.0.0"
+version = "1.1.0"
 description = "Run AI agents and other programs in a bubblewrap sandbox with reviewable, jailed writes."
 license = "MIT"
 license-files = ["LICENSE"]

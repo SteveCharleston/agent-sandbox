@@ -1,6 +1,6 @@
 # Agent Sandbox: Specification
 
-Status: v1.0, implemented in agent-sandbox 1.0.0 (2026-11-08)
+Status: v1.1, implemented in agent-sandbox 1.1.0 (2026-11-08)
 Keywords **MUST**, **SHOULD**, **MAY** are used as in RFC 2119.
 Requirements have stable IDs (e.g. `FR-12`) so tests and code can reference them.
 
