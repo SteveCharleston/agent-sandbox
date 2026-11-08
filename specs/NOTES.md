@@ -241,3 +241,10 @@ numbers there ("Bad fd number"); the test now writes to `/proc/self/fd/$2`. NixO
 Ubuntu-specific note: inside the container, the host kernel decides about user
 namespaces. On a real Ubuntu 24.04 host, `kernel.apparmor_restrict_unprivileged_userns`
 must allow `bwrap` (README: requirements; the CI workflow sets it).
+
+## GitHub Actions (2026-11-08)
+
+The first CI runs (commit `99322ea`) failed on all three Python versions with exactly the
+`dash` bug found in the containers ("Bad fd number"). From commit `47e7642` on, CI passes
+on Ubuntu 24.04 for Python 3.11, 3.12 and 3.13: quality gate green, 576 tests passed each,
+none skipped. The AppArmor `sysctl` step works on GitHub's runners.

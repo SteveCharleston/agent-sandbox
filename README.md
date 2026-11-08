@@ -218,3 +218,7 @@ uv run black --check . && uv run isort --check . && uv run flake8 \
 
 Integration tests need `bwrap`, `fuse-overlayfs` and user namespaces; they are skipped
 automatically where these are not available. Nothing in the test suite needs root.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
