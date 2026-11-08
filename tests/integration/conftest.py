@@ -48,6 +48,16 @@ class Cli:
         """The command line for ``agent-sandbox ARGS``."""
         return [sys.executable, "-m", "agent_sandbox", *args]
 
+    def start(self, *args: str) -> "subprocess.Popen[str]":
+        """Start ``agent-sandbox ARGS`` with stdout as a pipe and stderr discarded."""
+        return subprocess.Popen(
+            self.command(*args),
+            env=self.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+
     def __call__(
         self,
         *args: str,

@@ -151,3 +151,23 @@ Verified inside the sandbox with the real host `$PATH`:
 - TTY behavior (`--new-session`, job control) was not tested because the spike had no
   terminal. Decide this together with open question 3 when Step 5 is implemented.
 - Startup latency of overlay mounts (NFR-30) was not measured.
+
+## Step 6 findings (2026-11-07)
+
+- `fuse-overlayfs` accepts a **symlink as `lowerdir`** and relative option values when
+  started in the jail directory (`-o lowerdir=lower,upperdir=upper,workdir=work merged`).
+  A lower path containing a space, `,` and `:` works this way (FR-74).
+- Without `-f`, `fuse-overlayfs` returns after about 0.02 s with the mount ready. Its
+  daemon does not keep captured stdout/stderr pipes open, so `subprocess.run(...,
+  capture_output=True)` does not hang.
+- Mounting twice on the same mount point fails (`fusermount3: failed to access
+  mountpoint ... Permission denied`), so stale mounts must be removed first (FR-62).
+- An upper directory that is not a directory fails with `cannot read upper dir: Not a
+  directory`, which is passed on as the setup error (FR-63).
+- After `kill -9` of `agent-sandbox`, `bwrap` and the program die (`--die-with-parent`),
+  but the `fuse-overlayfs` daemon and its mount stay. The next `run` unmounts it with
+  `fusermount3 -u`, and the upper layer is intact (integration test).
+- **`-j ~` with the default state directory** puts the upper layer inside the lower
+  directory. `fuse-overlayfs` handles this. The state directory must be hidden in the
+  sandbox even when it is only created by this run (bug found and fixed: the hiding
+  decision used to depend on whether the directory existed before the run).

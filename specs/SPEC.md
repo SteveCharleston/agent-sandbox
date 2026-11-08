@@ -163,7 +163,8 @@ agent-sandbox run [options] [--] PROGRAM [ARGS...]
   spec alias (FR-31), and not inside the hidden state directory (FR-39). A `PROGRAM`
   containing `/` is checked the same way, relative to the working directory. The
   check happens before `bwrap` starts; `PROGRAM` is passed to `bwrap` unchanged, so
-  `argv[0]` stays as given.
+  `argv[0]` stays as given. Inside a jailed path the check uses the merged view, so a
+  program created in an earlier session (pending changes) is found.
 - FR-10: Short flags **MUST** accept both `-r PATH` and `-rPATH`. Long flags **MUST**
   accept both `--ro PATH` and `--ro=PATH`. Further rules:
   - `-r=PATH` is treated like `-rPATH` with the `=` removed (argparse convention).
@@ -417,10 +418,15 @@ directories is always shared **read-only**.
 - FR-60: Order for `run`: validate arguments, check dependencies, acquire locks (8.3),
   mount overlays, start bwrap, wait, unmount overlays, release locks.
 - FR-61: Overlays **MUST** be unmounted and temporary directories removed after the
-  program exits, whether it ends normally, by signal, or because of an error.
+  program exits, whether it ends normally, by signal, or because of an error. `SIGTERM`
+  and `SIGHUP` received while overlays are being set up or torn down also lead to a
+  clean unmount (exit `128+S`).
 - FR-62: If the tool crashes or is killed hard, the next `run`, `listdiffs`, or `merge`
   **SHOULD** detect stale locks and stale mounts (dead PID) and clean them up. Pending
-  changes in upper layers **MUST NEVER** be lost during this cleanup.
+  changes in upper layers **MUST NEVER** be lost during this cleanup. A stale mount is
+  a mount on a jail's `merged/` directory (according to `/proc/self/mountinfo`) while
+  nobody holds the jail's lock. It is unmounted with `fusermount3 -u`, falling back to
+  a lazy unmount (`-u -z`) if it is busy.
 - FR-63: Failure to set up one overlay aborts the entire `run` with exit 125, and
   already-mounted overlays are unmounted before exit.
 
@@ -446,7 +452,10 @@ directories is always shared **read-only**.
 - FR-73: Overlays are mounted by the unprivileged user. No root, no `sudo` (see 9.1).
 - FR-74: The overlay mount happens outside the sandbox on the host, in a private
   directory inside the state directory with mode `0700`, and only the merged view
-  is bind-mounted into the sandbox.
+  is bind-mounted into the sandbox. `fuse-overlayfs` is started in the jail directory
+  with the fixed relative names `lowerdir=lower,upperdir=upper,workdir=work`, where
+  `lower` is a symlink to the real directory. This way, paths containing `,` or `:`
+  (which are separators in the mount options) work.
 - FR-75: Pending changes **accumulate** across sessions: a later `run -j PATH` sees the
   earlier pending changes of `PATH` as part of the overlay. They persist until `merge`
   or `discard`.
@@ -470,7 +479,17 @@ directories is always shared **read-only**.
       upper/       # upper layer
       work/        # overlayfs workdir (same filesystem as upper/)
       lock         # lock file with owner PID while a session runs
+      lower        # symlink to the lower directory (FR-74)
+      merged/      # mount point of the merged view while a session runs
   ```
+
+  For a jailed **directory**, the lower directory is the path itself. For a jailed
+  **file** (FR-37), the lower directory is the file's parent directory, and the upper
+  layer holds at most the file itself, under its name.
+- FR-81a: If `meta.json` of a path records a different kind (directory versus file)
+  than the path has now, `run -j` fails (exit 125) and asks to merge or discard the
+  pending changes first. `meta.json` must record the same path; anything else is
+  reported as corrupt state and never deleted automatically.
 
 - FR-82: The state directory and everything below it **MUST** be created with mode
   `0700`.
@@ -485,6 +504,10 @@ directories is always shared **read-only**.
 
 - FR-85: A lock (`flock` or PID file) protects each jailed path while a session runs.
   `merge` and `discard` take the same lock. Stale locks of dead processes are ignored.
+  Implementation: an exclusive, non-blocking `flock` on the jail's `lock` file, held
+  by `agent-sandbox` for the whole session. The kernel releases it when the process
+  dies, so locks can never become stale. The holder writes its PID into the file
+  only so that FR-76 can name it.
 
 ## 9. Unprivileged Operation, Host Requirements and Error Handling
 

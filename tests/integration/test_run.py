@@ -5,7 +5,6 @@ import pty
 import select
 import shutil
 import signal
-import subprocess
 import time
 from pathlib import Path
 
@@ -170,13 +169,7 @@ def test_fr23_arguments_and_stdin_are_passed_through(cli: Cli) -> None:
 def test_fr24_sigterm_is_forwarded_to_the_program(cli: Cli) -> None:
     """FR-24: SIGTERM sent to agent-sandbox reaches the program, which can clean up."""
     script = 'trap "echo got-TERM; exit 42" TERM; echo started; sleep 30 & wait'
-    with subprocess.Popen(
-        cli.command("run", "--", "sh", "-c", script),
-        env=cli.env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-    ) as process:
+    with cli.start("run", "--", "sh", "-c", script) as process:
         assert process.stdout is not None
         assert process.stdout.readline() == "started\n"
         process.send_signal(signal.SIGTERM)

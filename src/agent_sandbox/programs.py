@@ -2,6 +2,7 @@
 
 import os
 import posixpath
+from collections.abc import Callable
 
 from agent_sandbox.bwrap import SandboxPlan
 
@@ -10,11 +11,14 @@ def _executable(path: str) -> bool:
     return os.path.isfile(path) and os.access(path, os.X_OK)
 
 
-def find_program(plan: SandboxPlan) -> str | None:
+def find_program(
+    plan: SandboxPlan, host_path: Callable[[str], str] = lambda path: path
+) -> str | None:
     """Return the path of the program as it will be found in the sandbox, or ``None``.
 
     A program with a ``/`` is taken relative to the working directory; otherwise the
-    sandbox's ``PATH`` is searched. Only visible locations count (FR-9).
+    sandbox's ``PATH`` is searched. Only visible locations count (FR-9). ``host_path``
+    maps a sandbox path to the host path to check, e.g. the merged view of a jail.
     """
     program = plan.argv[0]
     if "/" in program:
@@ -27,7 +31,7 @@ def find_program(plan: SandboxPlan) -> str | None:
     else:
         candidates = []
     for candidate in map(posixpath.normpath, candidates):
-        if plan.is_visible(candidate) and _executable(candidate):
+        if plan.is_visible(candidate) and _executable(host_path(candidate)):
             return candidate
     return None
 

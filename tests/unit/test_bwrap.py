@@ -362,3 +362,35 @@ def test_fr9_visibility(path: str, visible: bool) -> None:
     """FR-9: host content is visible below system mounts, mount specs and aliases only."""
     plan = make_plan([MountSpec("/data/proj", RO, DIR, aliases=("/home/u/proj",))])
     assert plan.is_visible(path) is visible
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/data/proj", "/state/merged"),
+        ("/data/proj/src/main.c", "/state/merged/src/main.c"),
+        ("/data/proj/docs/x", "/data/proj/docs/x"),
+        ("/data/notes.txt", "/state/n/merged/notes.txt"),
+        ("/data/project2", "/data/project2"),
+        ("/usr/bin/ls", "/usr/bin/ls"),
+    ],
+)
+def test_fr9_host_path_follows_deepest_bind(path: str, expected: str) -> None:
+    """FR-9: sandbox paths map to their host source through the deepest bind."""
+    plan = make_plan(
+        [
+            MountSpec("/data/proj", JAIL, DIR),
+            MountSpec("/data/proj/docs", RO, DIR),
+            MountSpec("/data/notes.txt", JAIL, FILE),
+        ],
+        jail_sources={
+            "/data/proj": "/state/merged",
+            "/data/notes.txt": "/state/n/merged/notes.txt",
+        },
+    )
+    assert plan.host_path(path) == expected
+
+
+def test_fr9_host_path_below_root_bind() -> None:
+    """FR-9: a bind on ``/`` maps paths unchanged."""
+    assert make_plan([MountSpec("/", RO, DIR)]).host_path("/x/y") == "/x/y"

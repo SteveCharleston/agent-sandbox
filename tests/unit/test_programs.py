@@ -106,3 +106,11 @@ def test_fr29_invisible_entries_deduplicated_existing_only(root: Path) -> None:
 def test_fr29_no_path_no_warning(root: Path) -> None:
     """FR-29: nothing to report without PATH."""
     assert not invisible_path_entries(make_plan(root, "tool", None))
+
+
+def test_fr9_host_path_is_used_for_the_check(root: Path) -> None:
+    """FR-9: with overlays mounted, the merged view decides whether the program exists."""
+    plan = make_plan(root, "projtool", "ROOT/proj/bin")
+    hidden = str(root / "home" / "bin")
+    assert find_program(plan, lambda path: path) == str(root / "proj/bin/projtool")
+    assert find_program(plan, lambda path: path.replace(str(root / "proj/bin"), hidden)) is None

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_sandbox.deps import check_user_namespaces, find_bwrap
+from agent_sandbox.deps import check_user_namespaces, find_bwrap, find_overlay_tools
 from agent_sandbox.errors import ExitCode, SetupError
 
 
@@ -75,3 +75,31 @@ def test_fr96_setuid_bwrap_does_not_need_user_namespaces(bwrap: Path, tmp_path: 
     """FR-96: a setuid bwrap works without unprivileged user namespaces."""
     bwrap.chmod(0o4755)
     check_user_namespaces(str(bwrap), write_sysctls(tmp_path, {"user/max_user_namespaces": "0"}))
+
+
+def make_tools(directory: Path, names: list[str]) -> None:
+    """Create fake executables."""
+    directory.mkdir(exist_ok=True)
+    for name in names:
+        (directory / name).write_text("#!/bin/sh\n")
+        (directory / name).chmod(0o755)
+
+
+@pytest.mark.parametrize("fusermount", ["fusermount3", "fusermount"])
+def test_fr90_find_overlay_tools(tmp_path: Path, fusermount: str) -> None:
+    """FR-90, FR-97: fuse-overlayfs and fusermount3, or fusermount as fallback."""
+    make_tools(tmp_path / "bin", ["fuse-overlayfs", fusermount])
+    tools = find_overlay_tools(str(tmp_path / "bin"))
+    assert tools.fuse_overlayfs == str(tmp_path / "bin" / "fuse-overlayfs")
+    assert tools.fusermount == str(tmp_path / "bin" / fusermount)
+
+
+@pytest.mark.parametrize(
+    ("present", "missing"),
+    [(["fusermount3"], "fuse-overlayfs"), (["fuse-overlayfs"], "fusermount3")],
+)
+def test_fr90_missing_overlay_tools(tmp_path: Path, present: list[str], missing: str) -> None:
+    """FR-90: a missing tool for ``-j`` is named in the error."""
+    make_tools(tmp_path / "bin", present)
+    with pytest.raises(SetupError, match=f"^{missing}.* not found in PATH; -j needs it"):
+        find_overlay_tools(str(tmp_path / "bin"))

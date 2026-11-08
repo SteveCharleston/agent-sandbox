@@ -63,6 +63,18 @@ class SandboxPlan:  # pylint: disable=too-many-instance-attributes
         """Whether the host's ``path`` (absolute, normalized) is visible in the sandbox."""
         return _visible(path, self.visible_roots(), self.hidden)
 
+    def host_path(self, path: str) -> str:
+        """Where the sandbox's ``path`` comes from on the host (through the deepest bind).
+
+        Only jailed binds have a different source; for them this is the merged view.
+        """
+        binds = [bind for bind in self.binds if is_within(path, bind.dest)]
+        if not binds:
+            return path
+        bind = max(binds, key=lambda bind: len(bind.dest))
+        suffix = path if bind.dest == "/" else path[len(bind.dest) :]
+        return bind.source.rstrip("/") + suffix if suffix else bind.source
+
 
 def _visible(path: str, roots: Iterable[str], hidden: Iterable[str]) -> bool:
     return any(is_within(path, root) for root in roots) and not any(

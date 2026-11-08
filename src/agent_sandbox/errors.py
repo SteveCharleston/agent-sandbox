@@ -36,3 +36,14 @@ class ProgramNotFoundError(AgentSandboxError):
     """The program to run does not exist inside the sandbox (FR-9)."""
 
     exit_code = ExitCode.NOT_FOUND
+
+
+class Terminated(BaseException):
+    """``SIGTERM`` or ``SIGHUP`` arrived while setting up or tearing down (FR-61).
+
+    A ``BaseException`` like ``KeyboardInterrupt``, so that only cleanup code sees it.
+    """
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"terminated by signal {signum}")
+        self.signum = signum

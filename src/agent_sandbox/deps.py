@@ -5,6 +5,7 @@ import shutil
 import stat
 
 from agent_sandbox.errors import SetupError
+from agent_sandbox.overlay import OverlayTools
 
 # sysctls that disable unprivileged user namespaces when they are 0.
 _USERNS_SYSCTLS = (
@@ -21,6 +22,22 @@ def find_bwrap(path: str | None = None) -> str:
             "bwrap (bubblewrap) not found in PATH; install it first (see README: requirements)"
         )
     return os.path.abspath(found)
+
+
+def find_overlay_tools(path: str | None = None) -> OverlayTools:
+    """Return ``fuse-overlayfs`` and ``fusermount3`` (or ``fusermount``) for ``-j`` (FR-90)."""
+    fuse_overlayfs = shutil.which("fuse-overlayfs", path=path)
+    if fuse_overlayfs is None:
+        raise SetupError(
+            "fuse-overlayfs not found in PATH; -j needs it (see README: requirements)"
+        )
+    fusermount = shutil.which("fusermount3", path=path) or shutil.which("fusermount", path=path)
+    if fusermount is None:
+        raise SetupError(
+            "fusermount3 (or fusermount) not found in PATH; -j needs it "
+            "(see README: requirements)"
+        )
+    return OverlayTools(os.path.abspath(fuse_overlayfs), os.path.abspath(fusermount))
 
 
 def check_user_namespaces(bwrap: str, proc_sys: str = "/proc/sys") -> None:

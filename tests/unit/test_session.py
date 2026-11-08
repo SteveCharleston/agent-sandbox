@@ -1,12 +1,22 @@
 """Tests for preparing ``run`` without starting bwrap (FR-9, FR-29, FR-60, --dry-run)."""
 
 import os
+import shutil
+import signal
 from pathlib import Path
 
 import pytest
 
-from agent_sandbox.cli import main
+from agent_sandbox import overlay, session
+from agent_sandbox.cli import main, parse_command
+from agent_sandbox.errors import ProgramNotFoundError, SetupError, Terminated
+from agent_sandbox.mounts import MountSpec
+from agent_sandbox.options import RunOptions
+from agent_sandbox.overlay import OverlayTools
 from agent_sandbox.session import logical_cwd
+from agent_sandbox.state import JailDir, jail_dir
+
+TOOLS = OverlayTools("/bin/fuse-overlayfs", "/bin/fusermount3")
 
 
 @pytest.fixture(name="project")
@@ -132,3 +142,155 @@ def test_fr92_unexpected_errors_are_one_line(
     err = capsys.readouterr().err
     assert "Traceback (most recent call last)" in err
     assert err.endswith("agent-sandbox: error: unexpected RuntimeError: boom\n")
+
+
+# --- jails with faked overlays (FR-60, FR-61, FR-63) ---
+
+
+class FakeSession:
+    """Fakes bwrap, the tools and the overlays; records what happens in which order."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, fail_on: set[str] | None = None) -> None:
+        self.events: list[str] = []
+        self.fail_on = fail_on or set()
+        self.exit_code = 0
+        self.raise_in_supervise: BaseException | None = None
+        self.command: list[str] = []
+        monkeypatch.setattr(session, "find_bwrap", lambda path: "/usr/bin/bwrap")
+        monkeypatch.setattr(session, "check_user_namespaces", lambda bwrap: None)
+        monkeypatch.setattr(session, "find_overlay_tools", lambda path: TOOLS)
+        monkeypatch.setattr(session, "supervise", self.supervise)
+        monkeypatch.setattr(overlay, "mount_overlay", self.mount)
+        monkeypatch.setattr(overlay, "unmount_overlay", self.unmount)
+        monkeypatch.setattr(overlay, "is_mounted", lambda path: False)
+
+    def mount(self, spec: MountSpec, jail: JailDir, tools: OverlayTools) -> None:
+        """Fake mount: create the merged directory from the upper layer only."""
+        del tools
+        if spec.path in self.fail_on:
+            raise SetupError(f"cannot mount the overlay for {spec.describe()}: fake")
+        self.events.append(f"mount {os.path.basename(spec.path)}")
+        shutil.copytree(jail.upper if os.path.isdir(jail.upper) else spec.path, jail.merged)
+
+    def unmount(self, merged: str, tools: OverlayTools) -> None:
+        """Fake unmount."""
+        del tools
+        self.events.append("unmount")
+        shutil.rmtree(merged, ignore_errors=True)
+
+    def supervise(self, command: list[str], env: object) -> int:
+        """Fake supervise."""
+        del env
+        self.command = command
+        self.events.append("bwrap")
+        if self.raise_in_supervise is not None:
+            raise self.raise_in_supervise
+        return self.exit_code
+
+
+def run_options(*argv: str) -> RunOptions:
+    """Parse ``run ARGV``."""
+    command = parse_command(["run", *argv])
+    assert isinstance(command, RunOptions)
+    return command
+
+
+def run_session(*argv: str) -> int:
+    """Run ``session.run`` for ``run ARGV`` in the current directory."""
+    return session.run(run_options(*argv), warn=no_log, debug=no_log)
+
+
+def no_log(message: str) -> None:
+    """Discard messages."""
+    del message
+
+
+def test_fr60_jails_are_mounted_before_and_unmounted_after_bwrap(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR-60, FR-36: mount, run bwrap with the merged view bound, unmount."""
+    fake = FakeSession(monkeypatch)
+    fake.exit_code = 3
+    (project / "a").mkdir()
+    (project / "b").mkdir()
+    assert run_session("-j", "a", "-j", "b", "--", "true") == 3
+    assert fake.events == ["mount a", "mount b", "bwrap", "unmount", "unmount"]
+    state = str(project.parent / "state")
+    merged = jail_dir(state, str(project / "a")).merged
+    assert ["--bind", merged, str(project / "a")] == fake.command[
+        fake.command.index(merged) - 1 : fake.command.index(merged) + 2
+    ]
+
+
+def test_fr63_failed_mount_unmounts_the_others(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR-63: if one overlay fails, the run aborts and mounted overlays are unmounted."""
+    (project / "a").mkdir()
+    (project / "b").mkdir()
+    fake = FakeSession(monkeypatch, fail_on={str(project / "b")})
+    with pytest.raises(SetupError, match="cannot mount the overlay for -j"):
+        run_session("-j", "a", "-j", "b", "--", "true")
+    assert fake.events == ["mount a", "unmount"]
+
+
+@pytest.mark.parametrize("exception", [Terminated(15), KeyboardInterrupt()])
+def test_fr61_signals_still_unmount(
+    project: Path, monkeypatch: pytest.MonkeyPatch, exception: BaseException
+) -> None:
+    """FR-61: termination by signal still unmounts the overlays."""
+    (project / "a").mkdir()
+    fake = FakeSession(monkeypatch)
+    fake.raise_in_supervise = exception
+    with pytest.raises(type(exception)):
+        run_session("-j", "a", "--", "true")
+    assert fake.events == ["mount a", "bwrap", "unmount"]
+
+
+def test_fr61_sigterm_handler_raises_terminated() -> None:
+    """FR-61: ``SIGTERM`` and ``SIGHUP`` raise ``Terminated`` only while the guard is active."""
+    before = signal.getsignal(signal.SIGTERM)
+    with session.terminate_on_signals():
+        with pytest.raises(Terminated) as info:
+            signal.raise_signal(signal.SIGHUP)
+        assert info.value.signum == signal.SIGHUP
+    assert signal.getsignal(signal.SIGTERM) == before
+
+
+def test_fr9_program_from_pending_changes_is_found(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR-9: a program created in an earlier session exists in the merged view."""
+    fake = FakeSession(monkeypatch)
+    state = str(project.parent / "state")
+    upper = jail_dir(state, str(project)).upper
+    os.makedirs(upper)
+    tool = Path(upper, "built-tool")
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    tool.chmod(0o755)
+    assert run_session("-j", ".", "--", "./built-tool") == 0
+    assert fake.events == ["mount project", "bwrap", "unmount"]
+
+
+def test_fr9_program_missing_in_jail_unmounts(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FR-9, FR-61: exit 127 inside a jail still unmounts."""
+    del project
+    fake = FakeSession(monkeypatch)
+    with pytest.raises(ProgramNotFoundError):
+        run_session("-j", ".", "--", "./missing")
+    assert fake.events == ["mount project", "unmount"]
+
+
+def test_dry_run_with_jail_creates_nothing(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Section 5.2: ``--dry-run`` shows the overlay setup but creates no state."""
+    assert main(["run", "--dry-run", "-j", ".", "--", "sh"]) == 0
+    out = capsys.readouterr().out
+    state = str(project.parent / "state")
+    jail = jail_dir(state, str(project))
+    assert out.startswith(f"# overlay for -j {project}: lower -> {project}\n(cd {jail.root} && ")
+    assert f"--bind {jail.merged} {project}" in out
+    assert not os.path.exists(state)

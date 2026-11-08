@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import NoReturn
 
 from agent_sandbox import __version__, session
-from agent_sandbox.errors import AgentSandboxError, ExitCode
+from agent_sandbox.errors import AgentSandboxError, ExitCode, Terminated
 from agent_sandbox.options import (
     Command,
     DiffOptions,
@@ -592,6 +592,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return exc.exit_code
     except KeyboardInterrupt:
         return 128 + signal.SIGINT
+    except Terminated as exc:
+        return 128 + exc.signum
     # FR-92: unexpected errors are reported in one line; the traceback only with --debug.
     except Exception as exc:  # pylint: disable=broad-exception-caught
         if command.debug:
