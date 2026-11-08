@@ -100,10 +100,12 @@ def test_fr24a_supervise_setup_failure(tmp_path: Path) -> None:
 def test_fr24_supervise_child_signal_mask_is_clean(tmp_path: Path) -> None:
     """FR-24: the child starts without blocked or ignored signals despite our mask."""
     out = tmp_path / "status"
-    # A shell script, because Python itself ignores SIGPIPE at startup.
+    # A shell script, because Python itself ignores SIGPIPE at startup. The status fd is
+    # written through /proc: dash (Debian's /bin/sh) only accepts one-digit fds in >&N.
     bwrap = tmp_path / "fake-bwrap.sh"
     bwrap.write_text(
-        f"#!/bin/sh\ncat /proc/self/status > '{out}'\nprintf '{{ \"exit-code\": 0 }}\\n' >&$2\n"
+        f"#!/bin/sh\ncat /proc/self/status > '{out}'\n"
+        "printf '{ \"exit-code\": 0 }\\n' > /proc/self/fd/$2\n"
     )
     bwrap.chmod(0o755)
     assert supervise([str(bwrap)], os.environ) == 0

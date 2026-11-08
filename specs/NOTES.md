@@ -195,9 +195,8 @@ Verified inside the sandbox with the real host `$PATH`:
 
 ## Step 9 findings (2026-11-08)
 
-- **Docker** is installed but its socket needs root (or the `docker` group), so the
-  planned local FHS run could not be done without `sudo`. FHS is covered by the CI
-  workflow (Ubuntu 24.04) instead.
+- **Docker** first needed root; after the user got access to the `docker` group, the
+  FHS runs below were done.
 - **Python 3.11** (via `nix-shell -p python311`, separate virtual environment): all
   tests pass, integration tests included, after removing backslashes from f-string
   expressions in one test (allowed only since Python 3.12).
@@ -216,3 +215,29 @@ Verified inside the sandbox with the real host `$PATH`:
 - **TIOCSTI filter:** inside the sandbox `TIOCSTI` and `TIOCLINUX` fail with `EPERM`,
   other ioctls work; outside, the kernel answers `EIO` (`legacy_tiocsti = 0`) and
   `ENOTTY`.
+
+## FHS verification in containers (2026-11-08)
+
+Three distributions, each in a `docker run --privileged` container (needed for
+`/dev/fuse` and nested namespaces; the host kernel is NixOS's 6.18). Prerequisites were
+installed as root; then, as an unprivileged user (uid 1000/1001), the full quality gate
+and `pytest` ran on a `git ls-files` copy of the project:
+
+| Distribution | Python | bubblewrap | fuse-overlayfs | fuse3 | Result |
+|--------------|--------|------------|----------------|-------|--------|
+| Debian 13 (trixie, `python:3.11-slim`) | 3.11.18 | 0.12.0 | 1.14 | Debian's | gate OK, 576 passed, 0 skipped |
+| Fedora 45 (`fedora:latest`) | 3.15.0 | 0.13.1 | Fedora's | 3.18.3 | gate OK, 576 passed, 0 skipped |
+| Ubuntu 24.04 (`ubuntu:24.04`) | 3.12.3 | 0.9.0 | 1.13 | Ubuntu's | gate OK, 576 passed, 0 skipped |
+
+All three detect the `fhs` layout (merged `/usr`: `/bin -> usr/bin`). This also covers
+the open items "older fuse-overlayfs and bwrap versions" (1.13 and 0.9.0 behave the
+same for everything tested) and Python 3.12 and 3.15.
+
+Found on the way: a unit test's stand-in `bwrap` script wrote to the status pipe with
+`>&$2`. On Debian and Ubuntu, `/bin/sh` is `dash`, which accepts only one-digit fd
+numbers there ("Bad fd number"); the test now writes to `/proc/self/fd/$2`. NixOS's
+`/bin/sh` is bash, so the bug did not show there.
+
+Ubuntu-specific note: inside the container, the host kernel decides about user
+namespaces. On a real Ubuntu 24.04 host, `kernel.apparmor_restrict_unprivileged_userns`
+must allow `bwrap` (README: requirements; the CI workflow sets it).

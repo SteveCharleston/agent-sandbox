@@ -322,10 +322,11 @@ AC-1 to AC-17
 **Done when:** all of AC-1 to AC-17 pass on at least one FHS machine. NixOS behavior is
 verified on a real NixOS system or documented as covered by unit tests only.
 
-**Status (2026-11-08):** all tests, including every AC, pass on NixOS with Python 3.13
-and 3.11. FHS verification runs in CI (`.github/workflows/ci.yml`, Ubuntu 24.04,
-Python 3.11 to 3.13); the local Docker run was not possible without root (see
-`NOTES.md`). The `v0.1.0` tag is left to the maintainer.
+**Status (2026-11-08):** done. The quality gate and all tests, including every AC, pass
+on NixOS (Python 3.13 and 3.11) and on three FHS distributions in containers: Debian 13
+(Python 3.11), Fedora 45 (Python 3.15) and Ubuntu 24.04 (Python 3.12), see `NOTES.md`.
+CI (`.github/workflows/ci.yml`) repeats this on Ubuntu 24.04 for Python 3.11 to 3.13.
+The `v0.1.0` tag is left to the maintainer.
 
 ---
 
