@@ -9,7 +9,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import NoReturn
 
-from agent_sandbox import __version__, session
+from agent_sandbox import __version__, merging, session
 from agent_sandbox.diffing import diff_text, listdiffs_text
 from agent_sandbox.errors import AgentSandboxError, ExitCode, Terminated
 from agent_sandbox.options import (
@@ -171,9 +171,10 @@ Apply the pending changes of the jailed path PATH to the real path, then clear
 them. New and modified files are copied (keeping mode, modification time and
 symlinks), deleted files and directories are removed.
 
-Shows a summary and asks for confirmation first, unless --yes is given. If
-merging fails halfway, the pending changes are kept and merge can safely be run
-again. Refuses to run while a session uses PATH.
+Shows a summary and asks for confirmation first, unless --yes is given; the
+question goes to stderr and the answer is read from stdin. If merging fails
+halfway, the pending changes are kept and merge can safely be run again.
+Refuses to run while a session uses PATH (--dry-run works anyway).
 """
 
 MERGE_EPILOG = """\
@@ -184,7 +185,8 @@ examples:
 
 exit codes:
   0       success
-  1       error, no pending changes for PATH, or PATH is in use by a session
+  1       error, no pending changes for PATH, PATH is in use by a session, or
+          the question was not answered with y
   2       usage error
 """
 
@@ -201,7 +203,8 @@ examples:
 
 exit codes:
   0       success
-  1       error, no pending changes for PATH, or PATH is in use by a session
+  1       error, no pending changes for PATH, PATH is in use by a session, or
+          the question was not answered with y
   2       usage error
 """
 
@@ -608,14 +611,33 @@ def _listdiffs(command: ListDiffsOptions) -> int:
     return ExitCode.OK
 
 
+def ask(question: str) -> bool:
+    """Ask on stderr, read the answer from stdin; only ``y`` or ``yes`` confirm (FR-40)."""
+    print(question, end="", file=sys.stderr, flush=True)
+    try:
+        answer = sys.stdin.readline()
+    except (OSError, ValueError):
+        answer = ""
+    if not answer.endswith("\n"):
+        print(file=sys.stderr)
+    return answer.strip().lower() in ("y", "yes")
+
+
+_IO = merging.Io(out=write_output, ask=ask, warn=warn)
+
+
 def _dispatch(command: Command) -> int:
-    if isinstance(command, RunOptions):
-        return session.run(command, warn=warn, debug=_debug_logger(command.debug))
-    if isinstance(command, DiffOptions):
-        return _diff(command)
-    if isinstance(command, ListDiffsOptions):
-        return _listdiffs(command)
-    raise AgentSandboxError(f"'{command.name}' is not implemented yet")
+    match command:
+        case RunOptions():
+            return session.run(command, warn=warn, debug=_debug_logger(command.debug))
+        case DiffOptions():
+            return _diff(command)
+        case ListDiffsOptions():
+            return _listdiffs(command)
+        case MergeOptions():
+            return merging.merge(command, _IO, host_env=os.environ, cwd=os.getcwd())
+        case DiscardOptions():
+            return merging.discard(command, _IO, host_env=os.environ, cwd=os.getcwd())
 
 
 def main(argv: Sequence[str] | None = None) -> int:

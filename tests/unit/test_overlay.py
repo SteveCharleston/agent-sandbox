@@ -50,9 +50,9 @@ class FakeMounts:
             raise SetupError(f"cannot mount the overlay for {spec.describe()}: fake")
         self.mounted.add(jail.merged)
 
-    def unmount(self, merged: str, tools: OverlayTools) -> None:
+    def unmount(self, merged: str, fusermount: str) -> None:
         """Fake ``unmount_overlay``."""
-        del tools
+        del fusermount
         self.calls.append(("unmount", merged))
         self.mounted.discard(merged)
 
@@ -209,7 +209,7 @@ def test_fr61_unmount_retries_then_lazy(
     fake = FakeRun(failures, mounted)
     monkeypatch.setattr(overlay, "_run", fake)
     monkeypatch.setattr(overlay, "is_mounted", lambda path: path in mounted)
-    unmount_overlay("/m", TOOLS, delay=0)
+    unmount_overlay("/m", TOOLS.fusermount, delay=0)
     assert not mounted
     assert (["/bin/fusermount3", "-u", "-z", "/m"] in fake.commands) is lazy
     assert len(fake.commands) == min(failures, 10) + 1
@@ -224,11 +224,11 @@ def test_fr61_unmount_failure_is_reported(monkeypatch: pytest.MonkeyPatch) -> No
     )
     monkeypatch.setattr(overlay, "is_mounted", lambda path: True)
     with pytest.raises(SetupError, match="cannot unmount /m: nope"):
-        unmount_overlay("/m", TOOLS, delay=0)
+        unmount_overlay("/m", TOOLS.fusermount, delay=0)
 
 
 def test_fr61_unmount_of_unmounted_path_does_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """FR-61: nothing to do if the overlay is already gone."""
     monkeypatch.setattr(overlay, "is_mounted", lambda path: False)
     monkeypatch.setattr(overlay, "_run", lambda command, cwd=None: pytest.fail("ran"))
-    unmount_overlay("/m", TOOLS)
+    unmount_overlay("/m", TOOLS.fusermount)

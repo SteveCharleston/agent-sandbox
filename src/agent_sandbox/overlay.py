@@ -104,19 +104,19 @@ def mount_overlay(spec: MountSpec, jail: JailDir, tools: OverlayTools) -> None:
 
 
 def unmount_overlay(
-    merged: str, tools: OverlayTools, *, attempts: int = 10, delay: float = 0.1
+    merged: str, fusermount: str, *, attempts: int = 10, delay: float = 0.1
 ) -> None:
     """Unmount ``merged``; retry while busy, then unmount lazily (FR-61, FR-62)."""
     result = None
     for _ in range(attempts):
         if not is_mounted(merged):
             return
-        result = _run([tools.fusermount, "-u", merged])
+        result = _run([fusermount, "-u", merged])
         if result.returncode == 0:
             return
         time.sleep(delay)
     if is_mounted(merged):
-        result = _run([tools.fusermount, "-u", "-z", merged])
+        result = _run([fusermount, "-u", "-z", merged])
         if result.returncode != 0 and is_mounted(merged):
             raise SetupError(f"cannot unmount {merged}: {_last_line(result.stderr)}")
 
@@ -134,7 +134,7 @@ def open_jail(
     with locked(jail.lock, spec.describe()):
         if is_mounted(jail.merged):
             debug(f"unmounting stale overlay {jail.merged}")
-            unmount_overlay(jail.merged, tools)
+            unmount_overlay(jail.merged, tools.fusermount)
         check_or_write_meta(jail, spec)
         debug(f"mounting overlay for {spec.describe()} at {jail.merged}")
         mount_overlay(spec, jail, tools)
@@ -142,4 +142,4 @@ def open_jail(
             yield jail
         finally:
             debug(f"unmounting overlay {jail.merged}")
-            unmount_overlay(jail.merged, tools)
+            unmount_overlay(jail.merged, tools.fusermount)

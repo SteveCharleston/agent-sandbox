@@ -184,3 +184,11 @@ Verified inside the sandbox with the real host `$PATH`:
   `git apply` keeps only the executable bit of modes. A `Binary files ... differ`
   block without binary data makes `git apply` abort the whole patch (and hit an
   assertion in git), so binary changes are comment lines instead.
+
+## Step 8 findings (2026-11-08)
+
+- **Read-only lower directories cannot be changed in a jail.** With `fuse-overlayfs`
+  alone (no sandbox), in a lower directory with mode `0555`: `chmod 755 dir`, creating
+  `dir/new` and `chmod 600 dir/existing` all fail with `Permission denied`. Recorded as
+  FR-70a. Read-only directories created *inside* the jail work (they live in the upper
+  layer), and `merge` handles them by setting directory modes last.

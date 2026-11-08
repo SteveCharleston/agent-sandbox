@@ -4,6 +4,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shutil
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -203,3 +204,41 @@ def locked(
         yield
     finally:
         os.close(fd)
+
+
+def _open_up(directory: str) -> None:
+    """Give the owner full access to a directory tree, opening each level before entering."""
+    os.chmod(directory, 0o700)
+    with os.scandir(directory) as entries:
+        for entry in entries:
+            if entry.is_dir(follow_symlinks=False):
+                _open_up(entry.path)
+
+
+def _remove_tree(path: str) -> None:
+    """Remove a directory tree, even if the program made parts of it read-only."""
+    if not os.path.lexists(path):
+        return
+    if not os.path.isdir(path) or os.path.islink(path):
+        os.unlink(path)
+        return
+    _open_up(path)
+    shutil.rmtree(path)
+
+
+def remove_jail(jail: JailDir) -> None:
+    """Delete a jail's state after merge or discard (FR-40, FR-44).
+
+    The upper layer goes first and ``meta.json`` last but one, so an interrupted removal
+    leaves a jail that ``listdiffs`` still shows. The lock file is removed while held.
+    """
+    _remove_tree(jail.upper)
+    _remove_tree(jail.work)
+    if os.path.isdir(jail.merged):
+        os.rmdir(jail.merged)
+    for path in (jail.lower_link, f"{jail.lower_link}.tmp", f"{jail.meta}.tmp", jail.meta):
+        if os.path.lexists(path):
+            os.unlink(path)
+    if os.path.lexists(jail.lock):
+        os.unlink(jail.lock)
+    os.rmdir(jail.root)

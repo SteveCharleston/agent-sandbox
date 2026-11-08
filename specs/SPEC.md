@@ -254,18 +254,43 @@ agent-sandbox discard [-y] [--state-dir DIR] [--debug] PATH
   directories are created/removed. Afterwards the upper layer for `PATH` is emptied.
   Before acting it **MUST** show a summary and ask for confirmation unless `-y/--yes`
   is given.
-- FR-41: `merge --dry-run` **MUST** print what would change and modify nothing.
+- FR-40a: **Output of `merge`.** Without `--yes`, the summary (the `diff --stat` lines
+  of FR-15 under a title line) goes to stdout and the question `Apply these N changes
+  to PATH? [y/N]` to stderr; the answer is read from stdin. Only `y` or `yes` (any
+  case) confirm; anything else, EOF or an unreadable stdin cancels with exit 1 and
+  `merge cancelled; nothing was changed`. While applying, each applied change is
+  printed as `STATUS<TAB>PATH` (directories end in `/`), and finally
+  `Merged N changes into PATH.`
+- FR-41: `merge --dry-run` **MUST** print what would change and modify nothing. It only
+  reads, so it does not take the lock and also works while a session runs.
 - FR-42: `merge` **MUST** be as atomic as practical: if it fails midway, the upper layer
   **MUST NOT** be cleared, and the error message states what has been applied. Repeating
-  `merge` must be safe (idempotent).
+  `merge` must be safe (idempotent). Implementation:
+  - Changes that cannot be merged (special files) are rejected before anything is
+    applied.
+  - Files and symlinks are written to a temporary name in the target directory and
+    renamed over the target, with the pending version's mode and times.
+  - Directory modes are set last, deepest first, so a directory the program made
+    read-only can still be filled. Directories the user cannot write to are opened
+    with `u+rwx` for the merge and restored afterwards.
+  - The changes are computed against the real path as it is now, so changes that
+    were already applied are no longer changes; this makes a repeated merge safe.
+  - On failure, the error names the change that failed; the `STATUS<TAB>PATH` lines
+    printed before it are the applied changes.
+  - After success, the jail's state is removed completely (`listdiffs` no longer
+    lists it).
 - FR-43: `merge` and `discard` **MUST** refuse (exit 1) while a session using `PATH` is
   still running (see 8.3).
 - FR-44: `discard` removes the upper layer content for `PATH` after confirmation unless
-  `-y/--yes` is given. The real path is never modified.
+  `-y/--yes` is given. The real path is never modified. Summary, question and answer
+  work like FR-40a (`Discard these N changes? [y/N]`); afterwards the jail's state is
+  removed completely and `Discarded N changes for PATH.` is printed.
 - FR-45: `diff`, `merge`, and `discard` **MUST** work for any path with state, even if
   `PATH` no longer exists on the host. `merge` recreates it.
 - FR-46: For `PATH` with no state, these commands fail with exit code 1 and the message
-  `no pending changes for PATH`. The exception is `diff`, which follows FR-14.
+  `no pending changes for PATH`. The exception is `diff`, which follows FR-14. State
+  without changes (for example after a session that only read files) is removed by
+  `merge` and `discard` without a question (`Merged 0 changes ...`).
 
 ### 5.6 Exit codes
 
@@ -468,6 +493,11 @@ directories is always shared **read-only**.
   reading shows lower content merged with prior pending changes, writes, creates,
   deletes, renames, chmods, and symlinks all succeed as on a normal filesystem. The
   program cannot tell it is an overlay (no path rewriting).
+- FR-70a: **Known limitation (fuse-overlayfs, tested in Step 8):** inside a directory
+  that is read-only in the real tree (no write permission for the owner, for example
+  Go's module cache), nothing can be changed in a jail: no new files, no `chmod` of
+  the directory or of files in it ("Permission denied"). This happens with
+  `fuse-overlayfs` alone, without the sandbox.
 - FR-71: The lower layer (the real path) **MUST NOT** be modified during a session.
   Verified by tests (checksum of lower tree before/after).
 - FR-72: Every change is stored in the upper layer in the state directory. Deletions and
@@ -760,7 +790,8 @@ These are not decided yet. Defaults below apply until they are.
 1. **Merge conflict detection:** if the real path changed on the host after the program
    modified it in the overlay, should `merge` detect and refuse (needs a recorded base
    snapshot or hash) or just overwrite? *Default: overwrite, `merge` prints a warning
-   when the real file's mtime is newer than the upper file.*
+   when the real file's mtime is newer than the upper file. (Implemented in Step 8, for
+   modified files and symlinks.)*
 2. **`/etc` exposure:** sharing all of `/etc` read-only is simple but exposes host
    configuration. Should there be a curated allowlist? *Default: whole `/etc`.*
 3. **Garbage collection:** should there be a command to list or remove stale state of

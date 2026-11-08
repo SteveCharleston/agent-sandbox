@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_sandbox.overlay import OverlayTools, is_mounted, unmount_overlay
+from agent_sandbox.overlay import is_mounted, unmount_overlay
 from agent_sandbox.state import jail_dir
 from tests.integration.conftest import Cli
 
@@ -35,7 +35,7 @@ def fixture_overlay_available(tmp_path_factory: pytest.TempPathFactory) -> None:
     if result.returncode != 0:
         pytest.skip(f"fuse-overlayfs cannot mount: {result.stderr.strip()}")
     # Right after mounting, fusermount3 -u is sometimes busy; unmount_overlay retries.
-    unmount_overlay(str(root / "merged"), OverlayTools(str(tools[0]), str(tools[1])))
+    unmount_overlay(str(root / "merged"), str(tools[1]))
 
 
 @pytest.fixture(autouse=True)
@@ -331,3 +331,103 @@ def test_fr13_real_diff_applies(
         assert snapshot(before) == snapshot(merged)
     else:
         assert git_modes(snapshot(before)) == git_modes(snapshot(merged))
+
+
+def test_ac6_full_review_cycle(cli: Cli, proj: Path) -> None:
+    """AC-6: run, listdiffs, diff, merge -y; afterwards the changes are real and none pending."""
+    script = "echo hi > a.txt; rm old.txt"
+    assert cli("run", "-j", ".", "--", "sh", "-c", script, cwd=proj).returncode == 0
+    assert not (proj / "a.txt").exists()
+    assert (proj / "old.txt").exists()
+    merged = cli("merge", "-y", str(proj))
+    assert merged.returncode == 0, merged.stderr
+    assert merged.stdout == f"A\ta.txt\nD\told.txt\nMerged 2 changes into {proj}.\n"
+    assert (proj / "a.txt").read_text(encoding="utf-8") == "hi\n"
+    assert not (proj / "old.txt").exists()
+    assert cli("listdiffs").stdout == ""
+    assert cli("diff", str(proj)).stdout == ""
+    assert not os.path.exists(jail_dir(str(cli.state_dir), str(proj)).root)
+
+
+def test_ac7_discard(cli: Cli, proj: Path) -> None:
+    """AC-7: discard leaves the host unchanged and nothing pending."""
+    before = snapshot(proj)
+    script = "echo hi > a.txt; rm old.txt"
+    assert cli("run", "-j", ".", "--", "sh", "-c", script, cwd=proj).returncode == 0
+    result = cli("discard", "-y", str(proj))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"Discarded 2 changes for {proj}.\n"
+    assert snapshot(proj) == before
+    assert cli("listdiffs").stdout == ""
+
+
+def test_ac10_fr43_merge_refused_during_session(cli: Cli, proj: Path) -> None:
+    """AC-10, FR-43: merge and discard exit 1 while a session uses the path."""
+    with cli.start(
+        "run", "-j", str(proj), "--", "sh", "-c", f"echo x > {proj}/new; echo ready; sleep 30"
+    ) as first:
+        assert first.stdout is not None
+        assert first.stdout.readline() == "ready\n"
+        for command in ("merge", "discard"):
+            result = cli(command, "-y", str(proj))
+            assert result.returncode == 1
+            assert f"is in use by another agent-sandbox session (PID {first.pid})" in result.stderr
+        assert cli("merge", "--dry-run", str(proj)).returncode == 0
+        first.send_signal(signal.SIGTERM)
+        first.wait(timeout=10)
+    assert not (proj / "new").exists()
+
+
+def test_fr40_merge_reproduces_the_merged_view_exactly(
+    cli: Cli, proj: Path, tmp_path: Path
+) -> None:
+    """FR-40, FR-42: after merge, the real directory equals what the sandbox saw."""
+    assert cli("run", "-j", ".", "--", "sh", "-c", TRANSPARENCY_SCRIPT, cwd=proj).returncode == 0
+    merged = tmp_path / "merged"
+    merged.mkdir()
+    copy = cli(
+        "run", "-j", str(proj), "-w", str(merged), "--", "cp", "-a", f"{proj}/.", str(merged)
+    )
+    assert copy.returncode == 0, copy.stderr
+    result = cli("merge", "-y", str(proj))
+    assert result.returncode == 0, result.stderr
+    assert snapshot(proj) == snapshot(merged)
+    second = cli("run", "-j", ".", "--", "true", cwd=proj)
+    assert second.returncode == 0
+    assert cli("diff", ".", cwd=proj).stdout == ""
+
+
+def test_fr40_merge_of_a_jailed_file(cli: Cli, proj: Path) -> None:
+    """AC-14, FR-37, FR-40: a jailed file merges into its directory; siblings stay."""
+    notes = proj / "notes.txt"
+    assert cli("run", "-j", str(notes), "--", "sh", "-c", f"echo more >> {notes}").returncode == 0
+    assert cli("merge", "-y", str(notes)).returncode == 0
+    assert notes.read_text(encoding="utf-8") == "notes\nmore\n"
+    assert (proj / "sibling.txt").read_text(encoding="utf-8") == "sibling\n"
+
+
+def test_fr62_merge_after_kill_cleans_up_the_stale_mount(cli: Cli, proj: Path) -> None:
+    """FR-62: merge removes a mount left by a killed session and applies the changes."""
+    with cli.start(
+        "run", "-j", str(proj), "--", "sh", "-c", f"echo kept > {proj}/new; echo ready; sleep 30"
+    ) as process:
+        assert process.stdout is not None
+        assert process.stdout.readline() == "ready\n"
+        process.kill()
+        process.wait(timeout=10)
+    jail = jail_dir(str(cli.state_dir), str(proj))
+    assert is_mounted(jail.merged)
+    result = cli("merge", "-y", str(proj))
+    assert result.returncode == 0, result.stderr
+    assert not is_mounted(jail.merged)
+    assert (proj / "new").read_text(encoding="utf-8") == "kept\n"
+
+
+def test_fr42_interrupted_cancel_keeps_everything(cli: Cli, proj: Path) -> None:
+    """FR-40a: without an answer (EOF on stdin), merge changes nothing."""
+    assert cli("run", "-j", ".", "--", "sh", "-c", "rm old.txt", cwd=proj).returncode == 0
+    result = cli("merge", str(proj), stdin="")
+    assert result.returncode == 1
+    assert result.stderr.endswith("agent-sandbox: error: merge cancelled; nothing was changed\n")
+    assert (proj / "old.txt").exists()
+    assert cli("listdiffs").stdout.startswith(f"{proj}\t1\t")

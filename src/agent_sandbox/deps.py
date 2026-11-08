@@ -24,6 +24,17 @@ def find_bwrap(path: str | None = None) -> str:
     return os.path.abspath(found)
 
 
+def find_fusermount(path: str | None = None) -> str:
+    """Return ``fusermount3``, or ``fusermount`` as fallback (FR-90, FR-97)."""
+    fusermount = shutil.which("fusermount3", path=path) or shutil.which("fusermount", path=path)
+    if fusermount is None:
+        raise SetupError(
+            "fusermount3 (or fusermount) not found in PATH; -j needs it "
+            "(see README: requirements)"
+        )
+    return os.path.abspath(fusermount)
+
+
 def find_overlay_tools(path: str | None = None) -> OverlayTools:
     """Return ``fuse-overlayfs`` and ``fusermount3`` (or ``fusermount``) for ``-j`` (FR-90)."""
     fuse_overlayfs = shutil.which("fuse-overlayfs", path=path)
@@ -31,13 +42,7 @@ def find_overlay_tools(path: str | None = None) -> OverlayTools:
         raise SetupError(
             "fuse-overlayfs not found in PATH; -j needs it (see README: requirements)"
         )
-    fusermount = shutil.which("fusermount3", path=path) or shutil.which("fusermount", path=path)
-    if fusermount is None:
-        raise SetupError(
-            "fusermount3 (or fusermount) not found in PATH; -j needs it "
-            "(see README: requirements)"
-        )
-    return OverlayTools(os.path.abspath(fuse_overlayfs), os.path.abspath(fusermount))
+    return OverlayTools(os.path.abspath(fuse_overlayfs), find_fusermount(path))
 
 
 def check_user_namespaces(bwrap: str, proc_sys: str = "/proc/sys") -> None:

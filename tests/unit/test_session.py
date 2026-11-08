@@ -172,9 +172,9 @@ class FakeSession:
         self.events.append(f"mount {os.path.basename(spec.path)}")
         shutil.copytree(jail.upper if os.path.isdir(jail.upper) else spec.path, jail.merged)
 
-    def unmount(self, merged: str, tools: OverlayTools) -> None:
+    def unmount(self, merged: str, fusermount: str) -> None:
         """Fake unmount."""
-        del tools
+        del fusermount
         self.events.append("unmount")
         shutil.rmtree(merged, ignore_errors=True)
 

@@ -190,23 +190,6 @@ def test_fr93_debug_before_subcommand(argv: list[str]) -> None:
     assert command.debug is True
 
 
-@pytest.mark.parametrize(
-    ("argv", "name"),
-    [
-        (["merge", "/p"], "merge"),
-        (["discard", "/p"], "discard"),
-    ],
-)
-def test_subcommands_are_not_implemented_yet(
-    capsys: pytest.CaptureFixture[str], argv: list[str], name: str
-) -> None:
-    """Stubs: subcommands not implemented yet report it and exit with 1."""
-    assert main(argv) == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err == f"agent-sandbox: error: '{name}' is not implemented yet\n"
-
-
 def test_nfr3_module_entry_point_runs() -> None:
     """NFR-3: the package can be run as ``python -m agent_sandbox``."""
     result = subprocess.run(
